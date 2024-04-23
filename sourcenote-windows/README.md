@@ -5,13 +5,13 @@ Status: _Essential part of my life_
 
 
 ## Summary
-I love [Sourcenote](https://www.sourcenoteapp.com/), the simple note saving tool for mac. It's a fantastic piece of software. So when I'm on my windows desktop, I seriously miss it. I haven't been able to find a tool that has the same smooth UX of just ctrl+c x2 to save. So I made this little autohotkey script. 
+I love [Sourcenote](https://www.sourcenoteapp.com/), the simple note saving tool for mac. It's a fantastic piece of software. So when I'm on my windows desktop, I seriously miss it. I haven't been able to find a tool that has the same smooth UX of just `ctrl+c` x2 to save. So I made this little autohotkey script. 
 
-All it does is save whatever I have selected when you ctrl+c x2 into an [obsidian](https://obsidian.md/) vault directory (and gives me a cute little notif saying that it worked), after which I can just view/search through with obsidian. 
+All it does is save whatever I have selected when I `ctrl+c` x2 into an [obsidian](https://obsidian.md/) vault directory (and gives a cute little notif saying that it worked). To retrieve I can just view/search through with obsidian. 
 
 ## Limitations 
-You will need ahk, which is a mildly annoying to set up.  
-Right now I also have the vault directory hard coded in the script. Supposedly I could do something like `EnvGet, vUserProfile, USERPROFILE` and use `vUserProfile` to get a users home dir but I figure anyone who uses it will want to edit the script with their prefered obsidianvault location anyway. 
+Requires ahk v1.1.  
+Right now I also have the vault directory hard coded in the script. Supposedly I could do something like `EnvGet, vUserProfile, USERPROFILE` and use `vUserProfile` to get a users home dir but I figure anyone who uses it will want to edit the script with their prefered obsidianvault location anyway. PRs welcome.
 
 ## Usage
 1. Install [Autohotkey](https://www.autohotkey.com/). I believe I'm using v1.1. 
