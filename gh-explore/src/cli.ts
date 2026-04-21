@@ -1,100 +1,60 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import { parseArgs } from "node:util";
-import { LogOutputSchema } from "./types.js";
-import { deriveFromLog, repoSlug } from "./derive.js";
-import { runHarness } from "./harness.js";
-import { showStatus } from "./status.js";
+import * as p from "@clack/prompts";
 
-const subcommand = process.argv[2];
+const COMMANDS = {
+  derive: () => import("./commands/derive.js"),
+  analyze: () => import("./commands/analyze.js"),
+  status: () => import("./commands/status.js"),
+} as const;
 
-if (subcommand === "status") {
-  const { values } = parseArgs({
-    args: process.argv.slice(3),
-    options: {
-      output: { type: "string", short: "o", default: "./archaeology-out" },
-    },
-  });
-  await showStatus(values.output!);
-  process.exit(0);
+type CommandName = keyof typeof COMMANDS;
+
+const interactive = process.stdin.isTTY ?? false;
+const rawArgs = process.argv.slice(2);
+let commandName = rawArgs[0] as string | undefined;
+
+const isCommand = commandName != null && commandName in COMMANDS;
+const commandArgs = isCommand ? rawArgs.slice(1) : rawArgs;
+if (!isCommand) commandName = undefined;
+
+// Legacy compat: bare file path implies "analyze"
+if (!commandName && rawArgs.length > 0 && !rawArgs[0].startsWith("-")) {
+  commandName = "analyze";
 }
 
-const { values, positionals } = parseArgs({
-  args: process.argv.slice(2),
-  allowPositionals: true,
-  options: {
-    output: { type: "string", short: "o", default: "./archaeology-out" },
-    model: { type: "string", short: "m", default: "claude-sonnet-4-20250514" },
-    "skip-to": { type: "string", default: "0" },
-    repo: { type: "string", short: "r" },
-    "derive-only": { type: "boolean", default: false },
-  },
-});
+if (!commandName) {
+  if (interactive) {
+    p.intro("gh-archaeology");
+    const selected = await p.select({
+      message: "What do you want to do?",
+      options: [
+        { value: "derive", label: "Derive", hint: "Parse log.json and write derived data" },
+        { value: "analyze", label: "Analyze", hint: "Run Claude analysis pipeline" },
+        { value: "status", label: "Status", hint: "Check running processes" },
+      ],
+    });
+    if (p.isCancel(selected)) {
+      p.outro("");
+      process.exit(0);
+    }
+    commandName = selected as CommandName;
+  } else {
+    console.error(
+      `Usage: archaeology <command> [options]
 
-const logPath = positionals[0];
-if (!logPath) {
-  console.error(
-    `Usage:
-  tsx src/cli.ts <log.json> [options]    Run the archaeology pipeline
-  tsx src/cli.ts status [-o dir]         Check running processes
+Commands:
+  derive   <log.json>   Parse log and write derived data
+  analyze  <log.json>   Run Claude analysis pipeline
+  status                Check running processes`
+    );
+    process.exit(1);
+  }
+}
 
-Options:
-  -o, --output <dir>     Output directory (default: ./archaeology-out)
-  -m, --model <name>     Claude model to use
-  --skip-to <N>          Resume from phase N
-  -r, --repo <name>      Filter to a single repo
-  --derive-only          Just derive data, don't run Claude pipeline`
-  );
+const loader = COMMANDS[commandName as CommandName];
+if (!loader) {
+  console.error(`Unknown command: ${commandName}`);
   process.exit(1);
 }
 
-const raw = JSON.parse(await readFile(logPath, "utf-8"));
-const log = LogOutputSchema.parse(raw);
-const data = deriveFromLog(log);
-
-console.log(
-  `Derived: ${data.repos.length} repos, ${data.manifest.stats.totalBranches} branches, ${data.days.length} active days`
-);
-for (const repo of data.repos) {
-  console.log(
-    `  ${repo.repo}: ${repo.branches.length} branches (${repo.orphanBranches.length} orphans), ${repo.commitCount} commits, ${repo.prCount} PRs`
-  );
-}
-
-if (values["derive-only"]) {
-  const outDir = values.output!;
-  await mkdir(outDir, { recursive: true });
-  await writeFile(
-    join(outDir, "manifest.json"),
-    JSON.stringify(data.manifest, null, 2)
-  );
-  await writeFile(
-    join(outDir, "days.json"),
-    JSON.stringify(data.days, null, 2)
-  );
-  for (const repo of data.repos) {
-    const slug = repoSlug(repo.repo);
-    const repoDir = join(outDir, slug);
-    await mkdir(repoDir, { recursive: true });
-    await writeFile(
-      join(repoDir, "repo.json"),
-      JSON.stringify(repo, null, 2)
-    );
-    const rm = data.repoManifests.find((m) => m.repo === repo.repo);
-    if (rm) {
-      await writeFile(
-        join(repoDir, "manifest.json"),
-        JSON.stringify(rm, null, 2)
-      );
-    }
-  }
-  console.log(`\nDerived data written to ${outDir}/`);
-  process.exit(0);
-}
-
-await runHarness(data, {
-  outputDir: values.output!,
-  model: values.model,
-  skipTo: parseInt(values["skip-to"]!, 10),
-  repoFilter: values.repo,
-});
+const mod = await loader();
+await mod.run(commandArgs, { interactive });

@@ -2,13 +2,14 @@ import { spawn } from "node:child_process";
 import { mkdir, writeFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { registerProcess, updateProcess } from "./processes.js";
-import { repoSlug, type DerivedData, type DerivedRepo, type DayCluster } from "./derive.js";
+import { repoSlug } from "./derive.js";
+import type { DerivedData, DerivedRepo, DayCluster } from "./types.js";
 
 export interface HarnessOptions {
   outputDir: string;
   model?: string;
   skipTo?: number;
-  repoFilter?: string;
+  repoFilter?: string | string[];
 }
 
 function runClaude(
@@ -316,7 +317,11 @@ export async function runHarness(
   const skipTo = opts.skipTo ?? 0;
 
   const repos = opts.repoFilter
-    ? data.repos.filter((r) => r.repo === opts.repoFilter)
+    ? data.repos.filter((r) =>
+        Array.isArray(opts.repoFilter)
+          ? opts.repoFilter.includes(r.repo)
+          : r.repo === opts.repoFilter
+      )
     : data.repos;
 
   console.log(`╔══════════════════════════════════════════════════════════╗`);
