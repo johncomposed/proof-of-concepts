@@ -1,14 +1,21 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile, readdir } from "node:fs/promises";
+import { mkdir, writeFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { registerProcess, updateProcess } from "./processes.js";
 import { repoSlug } from "./derive.js";
 import type { DerivedData, DerivedRepo, DayCluster } from "./types.js";
 
+export interface PhaseStep {
+  key: string;
+  phase: number;
+  name: string;
+  outputFile: string;
+  repo?: string;
+}
+
 export interface HarnessOptions {
   outputDir: string;
   model?: string;
-  skipTo?: number;
   repoFilter?: string | string[];
 }
 
@@ -74,29 +81,100 @@ function runClaude(
 }
 
 async function runPhase(
-  num: number,
-  name: string,
-  outputFile: string,
+  step: PhaseStep,
   prompt: string,
   model: string,
-  skipTo: number,
   outputDir: string
 ): Promise<void> {
-  if (skipTo > num) {
-    console.log(`⏭  Skipping phase ${num} (${name})`);
-    return;
-  }
-
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  console.log(`▸ Phase ${num}: ${name}`);
-  console.log(`  → output: ${outputFile}`);
+  console.log(`▸ Phase ${step.phase}: ${step.name}`);
+  console.log(`  → output: ${step.outputFile}`);
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
-  const result = await runClaude(prompt, model, outputDir, num, name, outputFile);
-  await writeFile(outputFile, result, "utf-8");
+  const result = await runClaude(prompt, model, outputDir, step.phase, step.name, step.outputFile);
+  await writeFile(step.outputFile, result, "utf-8");
 
   console.log(`  ✓ Done — ${Buffer.byteLength(result)} bytes written\n`);
 }
+
+// ── Phase step building ──────────────────────────────────────────
+
+function filterRepos(data: DerivedData, opts: HarnessOptions): DerivedRepo[] {
+  if (!opts.repoFilter) return data.repos;
+  return data.repos.filter((r) =>
+    Array.isArray(opts.repoFilter)
+      ? opts.repoFilter.includes(r.repo)
+      : r.repo === opts.repoFilter
+  );
+}
+
+export function buildPhaseSteps(
+  data: DerivedData,
+  opts: HarnessOptions
+): PhaseStep[] {
+  const analysisDir = join(opts.outputDir, "analysis");
+  const repos = filterRepos(data, opts);
+  const steps: PhaseStep[] = [];
+
+  for (const repo of repos) {
+    const slug = repoSlug(repo.repo);
+    const repoDir = join(analysisDir, slug);
+
+    steps.push({
+      key: `1:${repo.repo}`,
+      phase: 1,
+      name: `Structural Survey: ${repo.repo}`,
+      outputFile: join(repoDir, "01_structural_survey.md"),
+      repo: repo.repo,
+    });
+    steps.push({
+      key: `2:${repo.repo}`,
+      phase: 2,
+      name: `Branch Topology: ${repo.repo}`,
+      outputFile: join(repoDir, "02_branches.md"),
+      repo: repo.repo,
+    });
+    steps.push({
+      key: `3:${repo.repo}`,
+      phase: 3,
+      name: `Commit Narratives: ${repo.repo}`,
+      outputFile: join(repoDir, "03_commits.md"),
+      repo: repo.repo,
+    });
+  }
+
+  steps.push({
+    key: "6",
+    phase: 6,
+    name: "Synthesis — Dev Log",
+    outputFile: join(analysisDir, "06_dev_log.md"),
+  });
+  steps.push({
+    key: "7",
+    phase: 7,
+    name: "Fact-Check Pass",
+    outputFile: join(analysisDir, "07_fact_check.md"),
+  });
+
+  return steps;
+}
+
+export async function checkCompletion(
+  steps: PhaseStep[]
+): Promise<Map<string, boolean>> {
+  const result = new Map<string, boolean>();
+  for (const step of steps) {
+    try {
+      const s = await stat(step.outputFile);
+      result.set(step.key, s.size > 0);
+    } catch {
+      result.set(step.key, false);
+    }
+  }
+  return result;
+}
+
+// ── Prompt generation ────────────────────────────────────────────
 
 function summarizeBranches(repo: DerivedRepo): string {
   const lines: string[] = [];
@@ -150,44 +228,37 @@ function globalTimelineSummary(days: DayCluster[]): string {
   return lines.join("\n");
 }
 
-async function runRepoPhases(
-  repo: DerivedRepo,
-  repoDir: string,
-  days: DayCluster[],
-  model: string,
-  skipTo: number,
-  outputDir: string
-): Promise<void> {
-  await mkdir(repoDir, { recursive: true });
+function buildPrompt(
+  step: PhaseStep,
+  data: DerivedData,
+  repos: DerivedRepo[],
+  analysisDir: string
+): string {
+  const repo = step.repo
+    ? repos.find((r) => r.repo === step.repo)
+    : undefined;
 
-  const repoManifest = {
-    repo: repo.repo,
-    commitCount: repo.commitCount,
-    prCount: repo.prCount,
-    branchCount: repo.branches.length,
-    orphanBranches: repo.orphanBranches,
-    defaultBranch: repo.defaultBranch,
-  };
-  const manifestText = JSON.stringify(repoManifest, null, 2);
-  const timeline = repoTimelineSummary(days, repo.repo);
-  const branchSummary = summarizeBranches(repo);
-
-  // ── Phase 1: Repo Structural Survey ─────────────────────────────
-
-  await runPhase(
-    1,
-    `Structural Survey: ${repo.repo}`,
-    join(repoDir, "01_structural_survey.md"),
-    `You are analyzing the history of a single repository: ${repo.repo}
+  if (step.phase === 1 && repo) {
+    const slug = repoSlug(repo.repo);
+    const repoDir = join(analysisDir, slug);
+    const repoManifest = {
+      repo: repo.repo,
+      commitCount: repo.commitCount,
+      prCount: repo.prCount,
+      branchCount: repo.branches.length,
+      orphanBranches: repo.orphanBranches,
+      defaultBranch: repo.defaultBranch,
+    };
+    return `You are analyzing the history of a single repository: ${repo.repo}
 
 Here is the repo manifest:
 \`\`\`json
-${manifestText}
+${JSON.stringify(repoManifest, null, 2)}
 \`\`\`
 
 Here is the activity timeline for this repo only:
 \`\`\`
-${timeline}
+${repoTimelineSummary(data.days, repo.repo)}
 \`\`\`
 
 From this data, identify:
@@ -201,19 +272,12 @@ Output a structured markdown document with:
 - A "Phases of Work" section identifying apparent phases with date ranges and one-line descriptions
 - An "Open Questions" section listing things that aren't clear from structure alone
 
-Be concise. This is a scaffolding document that later analysis will flesh out.`,
-    model,
-    skipTo,
-    outputDir
-  );
+Be concise. This is a scaffolding document that later analysis will flesh out.`;
+  }
 
-  // ── Phase 2: Branch Topology ────────────────────────────────────
-
-  await runPhase(
-    2,
-    `Branch Topology: ${repo.repo}`,
-    join(repoDir, "02_branches.md"),
-    `You are analyzing the branch topology of ${repo.repo} for a retrospective dev log.
+  if (step.phase === 2 && repo) {
+    const branchSummary = summarizeBranches(repo);
+    return `You are analyzing the branch topology of ${repo.repo} for a retrospective dev log.
 The goal: every branch represents a deliberate decision to diverge. Figure out WHY.
 
 This analysis is for this repo ONLY. Do not reference other repos.
@@ -249,29 +313,23 @@ These are the most interesting archaeologically. For each, speculate on what hap
 ### Branch Timeline
 List branches chronologically by first commit date, showing overlapping work.
 
-Output as markdown.`,
-    model,
-    skipTo,
-    outputDir
-  );
+Output as markdown.`;
+  }
 
-  // ── Phase 3: Branch-Aware Commit Narratives ─────────────────────
+  if (step.phase === 3 && repo) {
+    const slug = repoSlug(repo.repo);
+    const repoDir = join(analysisDir, slug);
+    const commitDetails = repo.branches
+      .map((b) => {
+        const commitLines = b.commits.map(
+          (c) =>
+            `  - ${c.sha.slice(0, 8)} ${c.timestamp.slice(0, 10)} [+${c.additions ?? "?"}/-${c.deletions ?? "?"}] ${c.message.split("\n")[0]}`
+        );
+        return `### ${b.name} (${b.commits.length} commits)\n${commitLines.join("\n")}`;
+      })
+      .join("\n\n");
 
-  const commitDetails = repo.branches
-    .map((b) => {
-      const commitLines = b.commits.map(
-        (c) =>
-          `  - ${c.sha.slice(0, 8)} ${c.timestamp.slice(0, 10)} [+${c.additions ?? "?"}/-${c.deletions ?? "?"}] ${c.message.split("\n")[0]}`
-      );
-      return `### ${b.name} (${b.commits.length} commits)\n${commitLines.join("\n")}`;
-    })
-    .join("\n\n");
-
-  await runPhase(
-    3,
-    `Branch-Aware Commits: ${repo.repo}`,
-    join(repoDir, "03_commits.md"),
-    `You are analyzing the commit history of ${repo.repo} for a retrospective dev log.
+    return `You are analyzing the commit history of ${repo.repo} for a retrospective dev log.
 IMPORTANT: commits must be understood in the context of their BRANCH, not just their timestamp.
 This analysis is for this repo ONLY.
 
@@ -299,77 +357,26 @@ For the default branch, separate:
 End with a "Development Narrative" section that tells the story as a sequence of
 branches, not a sequence of commits.
 
-Output as markdown.`,
-    model,
-    skipTo,
-    outputDir
-  );
-}
-
-export async function runHarness(
-  data: DerivedData,
-  opts: HarnessOptions
-): Promise<void> {
-  const analysisDir = join(opts.outputDir, "analysis");
-  await mkdir(analysisDir, { recursive: true });
-
-  const model = opts.model ?? "claude-sonnet-4-20250514";
-  const skipTo = opts.skipTo ?? 0;
-
-  const repos = opts.repoFilter
-    ? data.repos.filter((r) =>
-        Array.isArray(opts.repoFilter)
-          ? opts.repoFilter.includes(r.repo)
-          : r.repo === opts.repoFilter
-      )
-    : data.repos;
-
-  console.log(`╔══════════════════════════════════════════════════════════╗`);
-  console.log(`║  Project Archaeology — Analysis Pipeline                ║`);
-  console.log(`╠══════════════════════════════════════════════════════════╣`);
-  console.log(`║  Output:  ${opts.outputDir}`);
-  console.log(`║  Repos:   ${repos.length} repos`);
-  console.log(`║  Model:   ${model}`);
-  console.log(`║  Skip to: phase ${skipTo}`);
-  console.log(`╚══════════════════════════════════════════════════════════╝\n`);
-
-  // ── Per-repo phases (1-3) in subdirectories ─────────────────────
-
-  for (const repo of repos) {
-    const slug = repoSlug(repo.repo);
-    const repoDir = join(analysisDir, slug);
-    console.log(`\n╸ Repo: ${repo.repo} → ${slug}/\n`);
-    await runRepoPhases(repo, repoDir, data.days, model, skipTo, opts.outputDir);
+Output as markdown.`;
   }
 
-  // ── Phase 6: Cross-repo Synthesis — The Dev Log ─────────────────
-
-  const repoAnalysisPaths: string[] = [];
-  for (const repo of repos) {
-    const slug = repoSlug(repo.repo);
-    const repoDir = join(analysisDir, slug);
-    try {
-      const files = (await readdir(repoDir))
-        .filter((f) => f.match(/^0[1-3].*\.md$/))
-        .map((f) => join(repoDir, f));
-      repoAnalysisPaths.push(...files);
-    } catch {
-      // dir might not exist if skipped
+  if (step.phase === 6) {
+    const manifestText = JSON.stringify(data.manifest, null, 2);
+    const globalTimeline = globalTimelineSummary(data.days);
+    const repoAnalysisPaths: string[] = [];
+    for (const r of repos) {
+      const slug = repoSlug(r.repo);
+      const repoDir = join(analysisDir, slug);
+      for (const num of ["01", "02", "03"]) {
+        const f = join(repoDir, `${num}_${{ "01": "structural_survey", "02": "branches", "03": "commits" }[num]}.md`);
+        repoAnalysisPaths.push(f);
+      }
     }
-  }
+    const repoList = repos
+      .map((r) => `- ${r.repo}: ${r.commitCount} commits, ${r.prCount} PRs, ${r.branches.length} branches`)
+      .join("\n");
 
-  const manifestText = JSON.stringify(data.manifest, null, 2);
-  const globalTimeline = globalTimelineSummary(data.days);
-
-  const repoList = repos
-    .map((r) => `- ${r.repo}: ${r.commitCount} commits, ${r.prCount} PRs, ${r.branches.length} branches`)
-    .join("\n");
-
-  await runPhase(
-    6,
-    "Synthesis — Dev Log",
-    join(analysisDir, "06_dev_log.md"),
-    `You are writing a retrospective dev log — the final synthesis of a project archaeology effort.
+    return `You are writing a retrospective dev log — the final synthesis of a project archaeology effort.
 This covers work across ${repos.length} repositories by a single developer.
 
 Repos:
@@ -408,21 +415,15 @@ Rules:
 - Keep it honest — if something is unclear, say so. Gaps in the record are part of the story.
 - Aim for the tone of a developer writing for other developers, not a formal report.
 
-Output as a complete markdown document.`,
-    model,
-    skipTo,
-    opts.outputDir
-  );
+Output as a complete markdown document.`;
+  }
 
-  // ── Phase 7: Fact-Check Pass ────────────────────────────────────
+  if (step.phase === 7) {
+    const manifestText = JSON.stringify(data.manifest, null, 2);
+    const globalTimeline = globalTimelineSummary(data.days);
+    const devLogPath = join(analysisDir, "06_dev_log.md");
 
-  const devLogPath = join(analysisDir, "06_dev_log.md");
-
-  await runPhase(
-    7,
-    "Fact-Check Pass",
-    join(analysisDir, "07_fact_check.md"),
-    `You are doing a fact-check and quality pass on a retrospective dev log.
+    return `You are doing a fact-check and quality pass on a retrospective dev log.
 
 Read the dev log: ${devLogPath}
 
@@ -442,11 +443,53 @@ Produce a SHORT review document:
 3. Gaps — important events in the timeline that the narrative skipped
 4. Suggestions for the strongest 2-3 improvements
 
-Be terse. This is a checklist, not a rewrite.`,
-    model,
-    skipTo,
-    opts.outputDir
-  );
+Be terse. This is a checklist, not a rewrite.`;
+  }
+
+  throw new Error(`Unknown phase: ${step.phase}`);
+}
+
+// ── Main entry point ─────────────────────────────────────────────
+
+export async function runHarness(
+  data: DerivedData,
+  opts: HarnessOptions,
+  selectedSteps?: PhaseStep[]
+): Promise<void> {
+  const analysisDir = join(opts.outputDir, "analysis");
+  await mkdir(analysisDir, { recursive: true });
+
+  const model = opts.model ?? "claude-sonnet-4-20250514";
+  const repos = filterRepos(data, opts);
+
+  const allSteps = buildPhaseSteps(data, opts);
+  const stepsToRun = selectedSteps ?? allSteps;
+  const selectedKeys = new Set(stepsToRun.map((s) => s.key));
+
+  // Ensure per-repo directories exist
+  for (const repo of repos) {
+    const slug = repoSlug(repo.repo);
+    await mkdir(join(analysisDir, slug), { recursive: true });
+  }
+
+  console.log(`╔══════════════════════════════════════════════════════════╗`);
+  console.log(`║  Project Archaeology — Analysis Pipeline                ║`);
+  console.log(`╠══════════════════════════════════════════════════════════╣`);
+  console.log(`║  Output:  ${opts.outputDir}`);
+  console.log(`║  Repos:   ${repos.length} repos`);
+  console.log(`║  Model:   ${model}`);
+  console.log(`║  Phases:  ${stepsToRun.length} of ${allSteps.length} steps`);
+  console.log(`╚══════════════════════════════════════════════════════════╝\n`);
+
+  for (const step of allSteps) {
+    if (!selectedKeys.has(step.key)) {
+      console.log(`⏭  Skipping: ${step.name}`);
+      continue;
+    }
+
+    const prompt = buildPrompt(step, data, repos, analysisDir);
+    await runPhase(step, prompt, model, opts.outputDir);
+  }
 
   // ── Done ────────────────────────────────────────────────────────
 

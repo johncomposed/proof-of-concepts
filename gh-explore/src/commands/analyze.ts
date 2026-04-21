@@ -3,14 +3,25 @@ import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { LogOutputSchema } from "../log-types.js";
 import { deriveFromLog } from "../derive.js";
-import { runHarness } from "../harness.js";
-import type { DerivedData } from "../types.js";
+import {
+  buildPhaseSteps,
+  checkCompletion,
+  runHarness,
+  type PhaseStep,
+} from "../harness.js";
 
 const MODELS = [
   { value: "claude-sonnet-4-20250514", label: "Sonnet 4", hint: "recommended" },
   { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "faster, cheaper" },
   { value: "claude-opus-4-20250514", label: "Opus 4", hint: "most capable" },
 ];
+
+function stepLabel(step: PhaseStep, done: boolean): string {
+  const repoShort = step.repo ? step.repo.split("/")[1] : undefined;
+  const prefix = repoShort ? `[${repoShort}] ` : "";
+  const suffix = done ? " (done)" : "";
+  return `${prefix}Phase ${step.phase}: ${step.name.replace(/: .*/, "")}${suffix}`;
+}
 
 export async function run(args: string[], ctx: { interactive: boolean }) {
   const { values, positionals } = parseArgs({
@@ -75,24 +86,55 @@ export async function run(args: string[], ctx: { interactive: boolean }) {
       }
     }
 
+    const harnessOpts = { outputDir, model, repoFilter };
+    const steps = buildPhaseSteps(data, harnessOpts);
+    const completion = await checkCompletion(steps);
+
+    const doneCount = [...completion.values()].filter(Boolean).length;
+    if (doneCount > 0) {
+      p.log.info(`${doneCount} of ${steps.length} phases already complete`);
+    }
+
+    const selected = await p.multiselect({
+      message: "Which phases to run?",
+      options: steps.map((step) => {
+        const done = completion.get(step.key) ?? false;
+        return {
+          value: step.key,
+          label: stepLabel(step, done),
+          initialValue: !done,
+        };
+      }),
+      required: true,
+    });
+    if (p.isCancel(selected)) {
+      p.outro("");
+      return;
+    }
+
+    const selectedKeys = new Set(selected as string[]);
+    const selectedSteps = steps.filter((s) => selectedKeys.has(s.key));
+
+    if (selectedSteps.length === 0) {
+      p.outro("Nothing to run");
+      return;
+    }
+
     if (!model) {
-      const selected = await p.select({
+      const modelChoice = await p.select({
         message: "Which model?",
         options: MODELS,
       });
-      if (p.isCancel(selected)) {
+      if (p.isCancel(modelChoice)) {
         p.outro("");
         return;
       }
-      model = selected as string;
+      model = modelChoice as string;
     }
 
     p.log.step(`Output:  ${outputDir}`);
     p.log.step(`Model:   ${model}`);
-    p.log.step(
-      `Repos:   ${repoFilter ? (Array.isArray(repoFilter) ? repoFilter.join(", ") : repoFilter) : "all"}`
-    );
-    if (skipTo > 0) p.log.step(`Skip to: phase ${skipTo}`);
+    p.log.step(`Running: ${selectedSteps.length} of ${steps.length} phases`);
 
     const confirm = await p.confirm({ message: "Start analysis?" });
     if (p.isCancel(confirm) || !confirm) {
@@ -100,7 +142,7 @@ export async function run(args: string[], ctx: { interactive: boolean }) {
       return;
     }
 
-    await runHarness(data, { outputDir, model, skipTo, repoFilter });
+    await runHarness(data, { ...harnessOpts, model }, selectedSteps);
     p.outro("Analysis complete");
   } else {
     if (!logPath) {
@@ -122,6 +164,14 @@ export async function run(args: string[], ctx: { interactive: boolean }) {
       );
     }
 
-    await runHarness(data, { outputDir, model, skipTo, repoFilter });
+    // Non-interactive: use skipTo for backward compat
+    const harnessOpts = { outputDir, model, repoFilter };
+    if (skipTo > 0) {
+      const steps = buildPhaseSteps(data, harnessOpts);
+      const filtered = steps.filter((s) => s.phase >= skipTo);
+      await runHarness(data, harnessOpts, filtered);
+    } else {
+      await runHarness(data, harnessOpts);
+    }
   }
 }

@@ -18,10 +18,10 @@ export interface ProcessState {
   processes: ProcessRecord[];
 }
 
-const STATE_FILENAME = ".archaeology-processes.json";
+export const CACHE_DIR = ".cache";
 
 function statePath(outputDir: string): string {
-  return join(outputDir, STATE_FILENAME);
+  return join(outputDir, CACHE_DIR, "processes.json");
 }
 
 export async function loadState(outputDir: string): Promise<ProcessState> {
@@ -38,7 +38,7 @@ async function saveState(
   state: ProcessState
 ): Promise<void> {
   state.updatedAt = new Date().toISOString();
-  await mkdir(outputDir, { recursive: true });
+  await mkdir(join(outputDir, CACHE_DIR), { recursive: true });
   await writeFile(statePath(outputDir), JSON.stringify(state, null, 2));
 }
 
