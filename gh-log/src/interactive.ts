@@ -300,11 +300,18 @@ export async function runInteractive(
 
   const prSpin = spinner();
   prSpin.start("Fetching PRs");
-  const prs = await fetchPrs(octokit, user, range, cache);
+  const allPrs = await fetchPrs(octokit, user, range, cache);
   const prsAfter = cache.getStats();
   const prsHit = prsAfter.hits > statsBefore.hits;
+
+  const repoFilter =
+    source === "local" && selectedRepos ? new Set(selectedRepos) : null;
+  const prs = repoFilter
+    ? allPrs.filter((p) => repoFilter.has(p.repo))
+    : allPrs;
+  const dropped = allPrs.length - prs.length;
   prSpin.stop(
-    `Fetched ${prs.length} PRs${prsHit ? " (from cache)" : " (from GitHub)"}`,
+    `Fetched ${allPrs.length} PRs${prsHit ? " (from cache)" : " (from GitHub)"}${dropped ? ` — filtered to ${prs.length} matching selected repos` : ""}`,
   );
 
   const statsBeforeCommits = cache.getStats();

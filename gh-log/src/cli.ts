@@ -141,6 +141,7 @@ const range = parseDateRange({
 console.error(`Fetching activity for ${user} from ${range.since} to ${range.until}...`);
 
 let commitProvider: CommitProvider;
+let repoFilter: Set<string> | null = null;
 if (source === "local") {
   const clonesDir = values["clones-dir"] ?? "./clones";
   let repos = values.repos?.split(",").filter(Boolean);
@@ -156,6 +157,7 @@ if (source === "local") {
     }
     repos = cloned;
   }
+  repoFilter = new Set(repos);
   commitProvider = new LocalGitCommitProvider({
     clonesDir,
     repos,
@@ -165,10 +167,17 @@ if (source === "local") {
   commitProvider = new GitHubCommitProvider(octokit, cache);
 }
 
-const [prs, commits] = await Promise.all([
+const [allPrs, commits] = await Promise.all([
   fetchPrs(octokit, user, range, cache),
   commitProvider.fetchCommits(user, range),
 ]);
+
+const prs = repoFilter ? allPrs.filter((p) => repoFilter!.has(p.repo)) : allPrs;
+if (repoFilter && prs.length < allPrs.length) {
+  console.error(
+    `[local] filtered out ${allPrs.length - prs.length} PRs from unanalyzed repos`,
+  );
+}
 
 if (source === "github") {
   await enrichCommitsBranchFromPrs(octokit, commits, prs, cache);
