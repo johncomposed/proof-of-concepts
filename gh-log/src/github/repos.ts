@@ -1,5 +1,6 @@
 import type { Octokit } from "octokit";
 import type { DateRange } from "../types.js";
+import { RepoListSchema } from "../types.js";
 import type { Cache } from "../cache.js";
 
 export async function discoverCommitRepos(
@@ -10,6 +11,7 @@ export async function discoverCommitRepos(
 ): Promise<string[]> {
   return cache.memo(
     `repos:${user}:${range.since}..${range.until}`,
+    RepoListSchema,
     async () => {
       const q = `author:${user} committer-date:${range.since}..${range.until}`;
       const repoSet = new Set<string>();

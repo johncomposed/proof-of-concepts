@@ -1,5 +1,6 @@
 import type { Octokit } from "octokit";
 import type { CommitEntry, DateRange, CommitProvider } from "../types.js";
+import { CommitEntryListSchema, CommitStatsSchema } from "../types.js";
 import type { Cache } from "../cache.js";
 import { batch } from "../utils.js";
 
@@ -12,6 +13,7 @@ export class GitHubCommitProvider implements CommitProvider {
   async fetchCommits(user: string, range: DateRange): Promise<CommitEntry[]> {
     return this.cache.memo(
       `commits:${user}:${range.since}..${range.until}`,
+      CommitEntryListSchema,
       async () => {
         const q = `author:${user} committer-date:${range.since}..${range.until}`;
 
@@ -40,6 +42,7 @@ export class GitHubCommitProvider implements CommitProvider {
           try {
             const stats = await this.cache.memo(
               `commit-stats:${c.repo}@${c.sha}`,
+              CommitStatsSchema,
               async () => {
                 const [owner, repoName] = c.repo.split("/");
                 const { data } = await this.octokit.rest.repos.getCommit({

@@ -18,6 +18,7 @@ import { GitHubCommitProvider } from "./providers/github-commits.js";
 import { LocalGitCommitProvider } from "./providers/local-git-commits.js";
 import type { Cache } from "./cache.js";
 import type { CommitProvider, DateRange, LogOutput } from "./types.js";
+import { z } from "zod";
 
 interface Defaults {
   months?: string;
@@ -55,6 +56,7 @@ export async function runInteractive(
   authSpin.start("Authenticating with GitHub");
   const authedUser = await cache.memo(
     "auth-user",
+    z.string(),
     async () => (await octokit.rest.users.getAuthenticated()).data.login,
   );
   authSpin.stop(`Signed in as ${authedUser}`);
