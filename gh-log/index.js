@@ -51,6 +51,15 @@ if (values.start || values.end) {
 
 const octokit = new Octokit({ auth: token });
 
+async function batch(items, concurrency, fn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += concurrency) {
+    const chunk = items.slice(i, i + concurrency);
+    results.push(...await Promise.all(chunk.map(fn)));
+  }
+  return results;
+}
+
 const user = values.user ?? (await octokit.rest.users.getAuthenticated()).data.login;
 
 console.error(`Fetching activity for ${user} from ${since} to ${until}...`);
@@ -76,9 +85,22 @@ for await (const { data } of octokit.paginate.iterator(octokit.rest.search.issue
       merged_at: pr.pull_request?.merged_at ?? null,
       url: pr.html_url,
       body: pr.body ?? "",
+      head_branch: null,
+      base_branch: null,
     });
   }
 }
+
+console.error(`Fetching branch info for ${prs.length} PRs...`);
+await batch(prs, 10, async (pr) => {
+  try {
+    const [owner, repo] = pr.repo.split("/");
+    const { data } = await octokit.rest.pulls.get({ owner, repo, pull_number: pr.number });
+    pr.head_branch = data.head.ref;
+    pr.base_branch = data.base.ref;
+  } catch {}
+  return pr;
+});
 
 const commits = [];
 for await (const { data } of octokit.paginate.iterator(octokit.rest.search.commits, {
@@ -95,9 +117,22 @@ for await (const { data } of octokit.paginate.iterator(octokit.rest.search.commi
       sha: c.sha,
       message: c.commit.message,
       url: c.html_url,
+      additions: null,
+      deletions: null,
     });
   }
 }
+
+console.error(`Fetching diff stats for ${commits.length} commits...`);
+await batch(commits, 10, async (c) => {
+  try {
+    const [owner, repo] = c.repo.split("/");
+    const { data } = await octokit.rest.repos.getCommit({ owner, repo, ref: c.sha });
+    c.additions = data.stats.additions;
+    c.deletions = data.stats.deletions;
+  } catch {}
+  return c;
+});
 
 const entries = [...prs, ...commits].sort((a, b) =>
   a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
