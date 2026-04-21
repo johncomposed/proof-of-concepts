@@ -9,10 +9,10 @@
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsx src/cli.ts",
-    "dev:chunk": "tsx src/cli-chunk.ts",
-    "log": "node dist/cli.js",
-    "chunk": "node dist/cli-chunk.js"
+    "dev": "tsx --env-file-if-exists=.env src/cli.ts",
+    "dev:chunk": "tsx --env-file-if-exists=.env src/cli-chunk.ts",
+    "log": "node --env-file-if-exists=.env dist/cli.js",
+    "chunk": "node --env-file-if-exists=.env dist/cli-chunk.js"
   },
   "dependencies": {
     "octokit": "^4.0.2"
