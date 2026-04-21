@@ -57,8 +57,9 @@ export function renderEntry(e: LogEntry): string {
   }
   const firstLine = (e.message ?? "").split("\n")[0];
   const rest = (e.message ?? "").split("\n").slice(1).join("\n").trim();
+  const branchPart = e.branch ? ` (${e.branch})` : "";
   const lines = [
-    `## [${ts}] commit ${e.repo}@${e.sha.slice(0, 7)}`,
+    `## [${ts}] commit ${e.repo}@${e.sha.slice(0, 7)}${branchPart}`,
     `**${firstLine}**`,
     `<${e.url}>`,
   ];

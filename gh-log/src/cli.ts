@@ -9,6 +9,7 @@ import {
   partitionCloned,
 } from "./providers/local-git-commits.js";
 import { discoverCommitRepos } from "./github/repos.js";
+import { enrichCommitsBranchFromPrs } from "./github/commit-branches.js";
 import { parseDateRange } from "./utils.js";
 import { Cache } from "./cache.js";
 import { runInteractive } from "./interactive.js";
@@ -168,6 +169,10 @@ const [prs, commits] = await Promise.all([
   fetchPrs(octokit, user, range, cache),
   commitProvider.fetchCommits(user, range),
 ]);
+
+if (source === "github") {
+  await enrichCommitsBranchFromPrs(octokit, commits, prs, cache);
+}
 
 const entries = [...prs, ...commits].sort((a, b) =>
   a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,

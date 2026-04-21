@@ -35,6 +35,7 @@ export class GitHubCommitProvider implements CommitProvider {
               url: c.html_url,
               additions: null,
               deletions: null,
+              branch: null,
             });
           }
         }

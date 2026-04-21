@@ -2,12 +2,15 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
+import { z } from "zod";
 import type { Octokit } from "octokit";
 import type { CommitEntry, DateRange, CommitProvider } from "../types.js";
 import type { Cache } from "../cache.js";
 import { discoverCommitRepos } from "../github/repos.js";
+import { batch } from "../utils.js";
 
 const execFile = promisify(execFileCb);
+const BranchSchema = z.string().nullable();
 
 export async function partitionCloned(
   clonesDir: string,
@@ -57,6 +60,7 @@ export class LocalGitCommitProvider implements CommitProvider {
       for (const c of parsed) {
         commits.push({ ...c, repo });
       }
+      await this.resolveBranches(repoDir, repo, commits);
     }
 
     return commits;
@@ -100,6 +104,46 @@ export class LocalGitCommitProvider implements CommitProvider {
         repoDir,
       ]);
     }
+  }
+
+  private async resolveBranches(
+    repoDir: string,
+    repo: string,
+    commits: CommitEntry[],
+  ): Promise<void> {
+    const forRepo = commits.filter((c) => c.repo === repo && !c.branch);
+    if (forRepo.length === 0) return;
+    await batch(forRepo, 20, async (c) => {
+      c.branch = await this.cache.memo(
+        `commit-branch:${c.repo}@${c.sha}`,
+        BranchSchema,
+        async () => {
+          try {
+            const { stdout } = await execFile(
+              "git",
+              [
+                "name-rev",
+                "--name-only",
+                "--exclude=HEAD",
+                "--refs=refs/heads/*",
+                "--refs=refs/remotes/*",
+                c.sha,
+              ],
+              { cwd: repoDir },
+            );
+            const name = stdout.trim();
+            if (!name || name === "undefined") return null;
+            return name
+              .replace(/^remotes\//, "")
+              .replace(/[~^]\d*$/, "")
+              .replace(/^origin\//, "");
+          } catch {
+            return null;
+          }
+        },
+      );
+      return c;
+    });
   }
 
   private async gitLog(
@@ -164,6 +208,7 @@ export class LocalGitCommitProvider implements CommitProvider {
         url: `https://github.com/${repoName}/commit/${sha}`,
         additions,
         deletions,
+        branch: null,
       });
     }
 

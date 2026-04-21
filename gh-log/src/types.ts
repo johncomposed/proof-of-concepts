@@ -15,8 +15,13 @@ export const CommitEntrySchema = z.object({
   url: z.string(),
   additions: z.number().nullable(),
   deletions: z.number().nullable(),
+  branch: z.string().nullable(),
 });
 export type CommitEntry = z.infer<typeof CommitEntrySchema>;
+
+// Schema for the list of SHAs that belong to a given PR's head branch.
+// Used to map commit sha -> PR head branch on the GitHub side.
+export const ShaListSchema = z.array(z.string());
 
 export const PrEntrySchema = z.object({
   type: z.literal("pr"),

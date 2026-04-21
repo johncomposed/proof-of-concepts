@@ -14,6 +14,7 @@ import {
 import { createOctokit, requireToken } from "./github/client.js";
 import { fetchPrs } from "./github/prs.js";
 import { discoverCommitRepos } from "./github/repos.js";
+import { enrichCommitsBranchFromPrs } from "./github/commit-branches.js";
 import { GitHubCommitProvider } from "./providers/github-commits.js";
 import {
   LocalGitCommitProvider,
@@ -321,6 +322,14 @@ export async function runInteractive(
   commitSpin.stop(
     `Fetched ${commits.length} commits${commitsHit && source === "github" ? " (from cache)" : source === "github" ? " (from GitHub)" : ""}`,
   );
+
+  if (source === "github") {
+    const branchSpin = spinner();
+    branchSpin.start("Resolving commit branches from PRs");
+    await enrichCommitsBranchFromPrs(octokit, commits, prs, cache);
+    const withBranch = commits.filter((c) => c.branch).length;
+    branchSpin.stop(`Branch resolved for ${withBranch}/${commits.length} commits`);
+  }
 
   const entries = [...prs, ...commits].sort((a, b) =>
     a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
