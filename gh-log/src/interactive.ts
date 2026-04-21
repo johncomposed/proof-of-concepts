@@ -29,6 +29,8 @@ interface Defaults {
   source?: string;
   clonesDir?: string;
   repos?: string;
+  cacheFile?: string;
+  noCache?: boolean;
 }
 
 function bail<T>(value: T | symbol): T {
@@ -43,11 +45,61 @@ function toIso(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+interface ChosenOptions {
+  out: string;
+  user: string;
+  authedUser: string;
+  rangeType: "months" | "explicit";
+  months?: string;
+  range: DateRange;
+  source: "github" | "local";
+  clonesDir?: string;
+  repos?: string[];
+  cacheFile?: string;
+  noCache: boolean;
+}
+
+function formatCliCommand(opts: ChosenOptions): string {
+  const args: string[] = [`--out=${opts.out}`];
+
+  if (opts.user !== opts.authedUser) args.push(`--user=${opts.user}`);
+
+  if (opts.rangeType === "months" && opts.months && opts.months !== "3") {
+    args.push(`--months=${opts.months}`);
+  } else if (opts.rangeType === "explicit") {
+    args.push(`--start=${opts.range.since}`);
+    args.push(`--end=${opts.range.until}`);
+  }
+
+  if (opts.source !== "github") args.push(`--source=${opts.source}`);
+  if (opts.source === "local") {
+    if (opts.clonesDir && opts.clonesDir !== "./clones") {
+      args.push(`--clones-dir=${opts.clonesDir}`);
+    }
+    if (opts.repos?.length) {
+      args.push(`--repos=${opts.repos.join(",")}`);
+    }
+  }
+
+  if (opts.cacheFile) args.push(`--cache-file=${opts.cacheFile}`);
+  if (opts.noCache) args.push(`--no-cache`);
+
+  return `pnpm dev -- ${args.join(" ")}`;
+}
+
 export async function runInteractive(
   defaults: Defaults,
   cache: Cache,
 ): Promise<void> {
   intro("gh-log");
+
+  const cacheStats = cache.getStats();
+  note(
+    cacheStats.disabled
+      ? "Cache disabled (--no-cache)"
+      : `Cache enabled${defaults.cacheFile ? ` (${defaults.cacheFile})` : ""}`,
+    "cache",
+  );
 
   const token = requireToken();
   const octokit = createOctokit(token);
@@ -80,8 +132,9 @@ export async function runInteractive(
   );
 
   let range: DateRange;
+  let monthsValue: string | undefined;
   if (rangeType === "months") {
-    const months = bail(
+    monthsValue = bail(
       await text({
         message: "How many months back?",
         initialValue: defaults.months ?? "3",
@@ -93,7 +146,7 @@ export async function runInteractive(
     );
     const end = new Date();
     const start = new Date();
-    start.setMonth(start.getMonth() - Number(months));
+    start.setMonth(start.getMonth() - Number(monthsValue));
     range = { since: toIso(start), until: toIso(end) };
   } else {
     const since = bail(
@@ -203,19 +256,30 @@ export async function runInteractive(
       ? new LocalGitCommitProvider({ clonesDir, repos: selectedRepos, cache })
       : new GitHubCommitProvider(octokit, cache);
 
-  const prSpin = spinner();
-  prSpin.start("Fetching PRs from GitHub");
-  const prs = await fetchPrs(octokit, user, range, cache);
-  prSpin.stop(`Fetched ${prs.length} PRs`);
+  const statsBefore = cache.getStats();
 
+  const prSpin = spinner();
+  prSpin.start("Fetching PRs");
+  const prs = await fetchPrs(octokit, user, range, cache);
+  const prsAfter = cache.getStats();
+  const prsHit = prsAfter.hits > statsBefore.hits;
+  prSpin.stop(
+    `Fetched ${prs.length} PRs${prsHit ? " (from cache)" : " (from GitHub)"}`,
+  );
+
+  const statsBeforeCommits = cache.getStats();
   const commitSpin = spinner();
   commitSpin.start(
     source === "local"
       ? `Cloning/fetching ${selectedRepos!.length} repos and parsing git log`
-      : "Fetching commits from GitHub",
+      : "Fetching commits",
   );
   const commits = await commitProvider.fetchCommits(user, range);
-  commitSpin.stop(`Fetched ${commits.length} commits`);
+  const commitsAfter = cache.getStats();
+  const commitsHit = commitsAfter.hits > statsBeforeCommits.hits;
+  commitSpin.stop(
+    `Fetched ${commits.length} commits${commitsHit && source === "github" ? " (from cache)" : source === "github" ? " (from GitHub)" : ""}`,
+  );
 
   const entries = [...prs, ...commits].sort((a, b) =>
     a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
@@ -231,6 +295,29 @@ export async function runInteractive(
   };
 
   await writeFile(out, JSON.stringify(output, null, 2));
+
+  const finalStats = cache.getStats();
+  if (!finalStats.disabled) {
+    note(
+      `${finalStats.hits} hits${finalStats.supersetHits ? ` (${finalStats.supersetHits} superset)` : ""}, ${finalStats.misses} misses, ${finalStats.writes} writes`,
+      "cache stats",
+    );
+  }
+
+  const chosen: ChosenOptions = {
+    out,
+    user,
+    authedUser,
+    rangeType,
+    months: monthsValue,
+    range,
+    source,
+    clonesDir: source === "local" ? clonesDir : undefined,
+    repos: selectedRepos,
+    cacheFile: defaults.cacheFile,
+    noCache: defaults.noCache ?? false,
+  };
+  note(formatCliCommand(chosen), "re-run non-interactively");
 
   outro(
     `Wrote ${entries.length} entries (${prs.length} PRs, ${commits.length} commits) to ${out}`,

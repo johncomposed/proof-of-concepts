@@ -30,14 +30,20 @@ const { values } = parseArgs({
 });
 
 const cacheFile = values["cache-file"] ?? DEFAULT_CACHE_FILE;
-const cache = new Cache(cacheFile, values["no-cache"] === true);
+const cacheDisabled = values["no-cache"] === true;
+const cache = new Cache(cacheFile, cacheDisabled);
 
 if (values["clear-cache"]) {
   await cache.clear();
-  console.error(`Cleared cache at ${cacheFile}`);
+  console.error(`[cache] cleared ${cacheFile}`);
 }
 
 await cache.load();
+console.error(
+  cacheDisabled
+    ? `[cache] disabled (--no-cache)`
+    : `[cache] using ${cacheFile}`,
+);
 
 // Interactive is the default. Non-interactive is opt-in by passing --out.
 // --interactive forces interactive even when --out is given.
@@ -54,6 +60,8 @@ if (useInteractive) {
       source: values.source,
       clonesDir: values["clones-dir"],
       repos: values.repos,
+      cacheFile: values["cache-file"],
+      noCache: cacheDisabled,
     },
     cache,
   );
@@ -114,6 +122,11 @@ const output: LogOutput = {
 
 await writeFile(values.out!, JSON.stringify(output, null, 2));
 await cache.save();
+
+const s = cache.getStats();
+console.error(
+  `[cache] ${s.hits} hits${s.supersetHits ? ` (${s.supersetHits} superset)` : ""}, ${s.misses} misses, ${s.writes} writes`,
+);
 console.error(
   `Wrote ${entries.length} entries (${prs.length} PRs, ${commits.length} commits) to ${values.out}`,
 );

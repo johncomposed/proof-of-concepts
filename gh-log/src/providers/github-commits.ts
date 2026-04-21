@@ -11,11 +11,13 @@ export class GitHubCommitProvider implements CommitProvider {
   ) {}
 
   async fetchCommits(user: string, range: DateRange): Promise<CommitEntry[]> {
-    return this.cache.memo(
-      `commits:${user}:${range.since}..${range.until}`,
+    return this.cache.memoRange(
+      `commits:${user}`,
       CommitEntryListSchema,
-      async () => {
-        const q = `author:${user} committer-date:${range.since}..${range.until}`;
+      range,
+      (c) => c.timestamp,
+      async (r) => {
+        const q = `author:${user} committer-date:${r.since}..${r.until}`;
 
         const commits: CommitEntry[] = [];
         for await (const { data } of this.octokit.paginate.iterator(

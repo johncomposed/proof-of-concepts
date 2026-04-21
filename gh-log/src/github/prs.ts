@@ -10,11 +10,13 @@ export async function fetchPrs(
   range: DateRange,
   cache: Cache,
 ): Promise<PrEntry[]> {
-  return cache.memo(
-    `prs:${user}:${range.since}..${range.until}`,
+  return cache.memoRange(
+    `prs:${user}`,
     PrEntryListSchema,
-    async () => {
-      const q = `type:pr author:${user} created:${range.since}..${range.until}`;
+    range,
+    (pr) => pr.timestamp,
+    async (r) => {
+      const q = `type:pr author:${user} created:${r.since}..${r.until}`;
 
       const prs: PrEntry[] = [];
       for await (const { data } of octokit.paginate.iterator(
