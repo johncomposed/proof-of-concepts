@@ -85,11 +85,29 @@ export interface Manifest {
   };
 }
 
+export interface RepoManifest {
+  repo: string;
+  slug: string;
+  since: string;
+  until: string;
+  commitCount: number;
+  prCount: number;
+  branchCount: number;
+  orphanCount: number;
+  dateRange: [string, string] | [];
+  activeDays: number;
+}
+
 export interface DerivedData {
   log: LogOutput;
   repos: DerivedRepo[];
   days: DayCluster[];
   manifest: Manifest;
+  repoManifests: RepoManifest[];
+}
+
+export function repoSlug(repo: string): string {
+  return repo.replace("/", "__");
 }
 
 export function deriveFromLog(log: LogOutput): DerivedData {
@@ -210,7 +228,32 @@ export function deriveFromLog(log: LogOutput): DerivedData {
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, dayEntries]) => ({ date, entries: dayEntries }));
 
-  // Manifest
+  // Per-repo manifests
+  const repoManifests: RepoManifest[] = repos.map((r) => {
+    const repoEntries = byRepo.get(r.repo) ?? [];
+    const repoDays = new Set<string>();
+    for (const e of repoEntries) {
+      repoDays.add(e.timestamp.slice(0, 10));
+    }
+    const sorted = [...repoEntries].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    return {
+      repo: r.repo,
+      slug: repoSlug(r.repo),
+      since: log.since,
+      until: log.until,
+      commitCount: r.commitCount,
+      prCount: r.prCount,
+      branchCount: r.branches.length,
+      orphanCount: r.orphanBranches.length,
+      dateRange:
+        sorted.length > 0
+          ? [sorted[0].timestamp.slice(0, 10), sorted[sorted.length - 1].timestamp.slice(0, 10)]
+          : [],
+      activeDays: repoDays.size,
+    };
+  });
+
+  // Global manifest
   const allBranches = repos.flatMap((r) => r.branches);
   const manifest: Manifest = {
     user: log.user,
@@ -230,5 +273,5 @@ export function deriveFromLog(log: LogOutput): DerivedData {
     },
   };
 
-  return { log, repos, days, manifest };
+  return { log, repos, days, manifest, repoManifests };
 }

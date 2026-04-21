@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { LogOutputSchema } from "./types.js";
-import { deriveFromLog } from "./derive.js";
+import { deriveFromLog, repoSlug } from "./derive.js";
 import { runHarness } from "./harness.js";
 import { showStatus } from "./status.js";
 
@@ -73,11 +73,20 @@ if (values["derive-only"]) {
     JSON.stringify(data.days, null, 2)
   );
   for (const repo of data.repos) {
-    const slug = repo.repo.replace("/", "__");
+    const slug = repoSlug(repo.repo);
+    const repoDir = join(outDir, slug);
+    await mkdir(repoDir, { recursive: true });
     await writeFile(
-      join(outDir, `${slug}_branches.json`),
+      join(repoDir, "repo.json"),
       JSON.stringify(repo, null, 2)
     );
+    const rm = data.repoManifests.find((m) => m.repo === repo.repo);
+    if (rm) {
+      await writeFile(
+        join(repoDir, "manifest.json"),
+        JSON.stringify(rm, null, 2)
+      );
+    }
   }
   console.log(`\nDerived data written to ${outDir}/`);
   process.exit(0);
