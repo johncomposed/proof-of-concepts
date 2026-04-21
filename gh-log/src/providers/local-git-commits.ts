@@ -4,6 +4,7 @@ import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { Octokit } from "octokit";
 import type { CommitEntry, DateRange, CommitProvider } from "../types.js";
+import { discoverCommitRepos } from "../github/repos.js";
 
 const execFile = promisify(execFileCb);
 
@@ -51,18 +52,7 @@ export class LocalGitCommitProvider implements CommitProvider {
       process.exit(1);
     }
 
-    const q = `author:${user} committer-date:${range.since}..${range.until}`;
-    const repoSet = new Set<string>();
-    for await (const { data } of this.octokit.paginate.iterator(
-      this.octokit.rest.search.commits,
-      { q, per_page: 100, sort: "committer-date", order: "desc" },
-    )) {
-      for (const c of data) {
-        repoSet.add(c.repository.full_name);
-      }
-    }
-
-    const repos = [...repoSet];
+    const repos = await discoverCommitRepos(this.octokit, user, range);
     console.error(`Discovered ${repos.length} repos from GitHub search`);
     return repos;
   }

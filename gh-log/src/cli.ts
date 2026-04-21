@@ -6,6 +6,7 @@ import { fetchPrs } from "./github/prs.js";
 import { GitHubCommitProvider } from "./providers/github-commits.js";
 import { LocalGitCommitProvider } from "./providers/local-git-commits.js";
 import { parseDateRange } from "./utils.js";
+import { runInteractive } from "./interactive.js";
 import type { LogOutput, CommitProvider } from "./types.js";
 
 const { values } = parseArgs({
@@ -15,17 +16,29 @@ const { values } = parseArgs({
     end: { type: "string" },
     out: { type: "string", short: "o" },
     user: { type: "string", short: "u" },
-    source: { type: "string", default: "github" },
+    source: { type: "string" },
     "clones-dir": { type: "string" },
     repos: { type: "string" },
+    interactive: { type: "boolean", short: "i" },
   },
 });
 
-if (!values.out) {
-  console.error(
-    "Usage: gh-log --out=<path.json> [--months=N | --start=YYYY-MM-DD --end=YYYY-MM-DD] [--user=login] [--source=github|local] [--clones-dir=path] [--repos=owner/repo,...]",
-  );
-  process.exit(1);
+// Interactive is the default. Non-interactive is opt-in by passing --out.
+// --interactive forces interactive even when --out is given.
+const useInteractive = values.interactive || !values.out;
+
+if (useInteractive) {
+  await runInteractive({
+    months: values.months,
+    start: values.start,
+    end: values.end,
+    out: values.out,
+    user: values.user,
+    source: values.source,
+    clonesDir: values["clones-dir"],
+    repos: values.repos,
+  });
+  process.exit(0);
 }
 
 const source = values.source ?? "github";
@@ -78,7 +91,7 @@ const output: LogOutput = {
   entries,
 };
 
-await writeFile(values.out, JSON.stringify(output, null, 2));
+await writeFile(values.out!, JSON.stringify(output, null, 2));
 console.error(
   `Wrote ${entries.length} entries (${prs.length} PRs, ${commits.length} commits) to ${values.out}`,
 );

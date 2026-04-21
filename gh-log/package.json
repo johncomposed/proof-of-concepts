@@ -15,6 +15,7 @@
     "chunk": "node --env-file-if-exists=.env dist/cli-chunk.js"
   },
   "dependencies": {
+    "@clack/prompts": "^1.2.0",
     "octokit": "^4.0.2"
   },
   "devDependencies": {
