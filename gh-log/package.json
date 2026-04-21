@@ -1,0 +1,17 @@
+{
+  "name": "gh-log",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "gh-log": "./index.js",
+    "gh-log-chunk": "./chunk.js"
+  },
+  "scripts": {
+    "log": "node index.js",
+    "chunk": "node chunk.js"
+  },
+  "dependencies": {
+    "octokit": "^4.0.2"
+  }
+}
