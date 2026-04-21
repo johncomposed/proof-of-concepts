@@ -1,152 +1,172 @@
 # Project Archaeology
 
-Reconstruct the intent behind old projects by mining Git history, daily notes, and Claude Code logs — then synthesize it all into a coherent retrospective dev log.
+Reconstruct the intent behind old projects by mining Git history, then synthesize it into a coherent retrospective dev log.
 
 ## What this does
 
-You point it at one or more GitHub repos (or local git repos), a folder of messy daily notes, and optionally any Claude Code conversation logs you can find. It extracts everything into structured JSON, then orchestrates a multi-phase Claude Code analysis pipeline that produces a first-person dev log — the blog post you never wrote.
+You feed it a `log.json` file (produced by a separate GitHub log tool) containing commits and PRs across multiple repos. It derives branch topology, classifies branches, detects orphans, then runs a multi-phase Claude analysis pipeline that produces a first-person dev log per repo and a cross-repo synthesis.
 
-The key insight: **branches are the primary unit of intent.** Every branch represents a deliberate decision to diverge. The pipeline treats them as first-class objects, not just a detail on commits.
+The key insight: **branches are the primary unit of intent.** Every branch represents a deliberate decision to diverge. The pipeline treats them as first-class objects.
 
 ## Files
 
 ```
-project-archaeology/
-├── README.md           ← you are here
-├── claude.md           ← Claude Code project instructions
-├── extract.py          ← data extraction (GitHub API + notes + logs)
-├── branches.py         ← branch topology extraction (local git or GitHub API)
-└── harness.sh          ← Claude Code orchestration pipeline (7 phases)
+gh-explore/
+├── src/
+│   ├── cli.ts         ← entry point
+│   ├── types.ts       ← Zod schemas for log input (LogOutputSchema)
+│   ├─ derive.ts      ← derives branch topology, timelines, manifests from log data
+│   ├── harness.ts     ← Claude CLI orchestration pipeline (phases 1-3 per repo, 6-7 cross-repo)
+│   ├── processes.ts   ← background process tracking (PID registry, state file)
+│   └── status.ts      ← interactive process manager (view/kill running phases)
+├── tmp/
+│   └── log.json       ← input data (gitignored)
+└── package.json
 ```
 
 ## Prerequisites
 
-- Python 3.10+
-- `requests` library (`pip install requests`)
-- A GitHub personal access token (for API access)
+- Node.js 18+
+- pnpm
 - Claude Code CLI installed and authenticated (`claude` command available)
-- Git CLI (for local repo analysis)
 
 ## Setup
 
 ```bash
-pip install requests
-export GITHUB_TOKEN=ghp_your_token_here
-chmod +x harness.sh
+pnpm install
 ```
 
 ## Usage
 
-### Step 1: Extract branch topology
-
-Run this first — the other scripts use its output.
+### Run the full pipeline
 
 ```bash
-# From GitHub API (works without cloning)
-python branches.py --repo owner/repo --output ./archaeology-out
-
-# From a local clone (richer data — merge-base detection is more accurate)
-python branches.py --local /path/to/repo --output ./archaeology-out
+pnpm dev tmp/log.json
 ```
 
-For multiple repos, run once per repo. They all write to the same output directory.
+This derives branch topology from the log, then runs Claude analysis phases for each repo.
 
-### Step 2: Extract commits, PRs, diffs, notes
+### Options
 
 ```bash
-python extract.py \
-  --repos owner/repo1 owner/repo2 \
-  --notes ~/daily-notes \
-  --output ./archaeology-out \
-  --max-diffs 30
+pnpm dev tmp/log.json [options]
+
+  -o, --output <dir>     Output directory (default: ./archaeology-out)
+  -m, --model <name>     Claude model to use (default: claude-sonnet-4-20250514)
+  --skip-to <N>          Resume from phase N
+  -r, --repo <name>      Filter to a single repo (e.g. owner/repo)
+  --derive-only          Derive data and write JSON, skip Claude pipeline
 ```
 
-If `branches.py` has already been run, `extract.py` will load the branch topology and sample diffs **per-branch** instead of evenly across the flat commit history. This ensures short-lived experimental branches get representation.
-
-### Step 3: Run the analysis pipeline
+### Derive only (no Claude calls)
 
 ```bash
-# Full pipeline
-./harness.sh ./archaeology-out
-
-# Single repo
-./harness.sh ./archaeology-out --repo owner__reponame
-
-# Resume from a specific phase
-./harness.sh ./archaeology-out --skip-to 5
-
-# Use Haiku for cheaper bulk phases
-./harness.sh ./archaeology-out --model haiku
+pnpm dev tmp/log.json --derive-only
 ```
 
-### Output
+Writes per-repo manifests and branch data to the output directory for inspection.
 
-All analysis outputs land in `archaeology-out/analysis/`:
+### Check running processes
+
+```bash
+pnpm dev status
+pnpm dev status -o ./my-output-dir
+```
+
+Interactive UI showing all tracked Claude processes with options to kill individual processes, kill all, or clear finished entries.
+
+### Single repo
+
+```bash
+pnpm dev tmp/log.json -r johncomposed/some-repo
+```
+
+## Input format
+
+The input `log.json` must match `LogOutputSchema` — a flat list of commit and PR entries across repos:
+
+```json
+{
+  "user": "username",
+  "since": "2025-01-01",
+  "until": "2026-01-01",
+  "generated_at": "...",
+  "counts": { "prs": 45, "commits": 758, "total": 803 },
+  "entries": [
+    {
+      "type": "commit",
+      "timestamp": "...",
+      "sha": "...",
+      "message": "...",
+      "url": "...",
+      "additions": 100,
+      "deletions": 50,
+      "branch": "feature-x",
+      "repo": "owner/repo"
+    },
+    {
+      "type": "pr",
+      "timestamp": "...",
+      "repo": "owner/repo",
+      "number": 1,
+      "title": "...",
+      "state": "closed",
+      "merged": true,
+      "merged_at": "...",
+      "url": "...",
+      "body": "...",
+      "head_branch": "feature-x",
+      "base_branch": "main"
+    }
+  ]
+}
+```
+
+## Output structure
+
+Each repo gets its own analysis subdirectory. Cross-repo synthesis lives at the top level.
 
 ```
-analysis/
-├── 01_structural_survey.md       ← project shape, activity clusters, date ranges
-├── 02_branches_REPO.md           ← per-branch intent analysis
-├── 03_commits_REPO.md            ← branch-aware commit narratives with diffs
-├── 04_notes_crossref.md          ← daily notes matched to development activity
-├── 05_claude_logs.md             ← Claude Code conversation analysis (if found)
-├── 06_dev_log.md                 ← THE FINAL DEV LOG (first-person retrospective)
-├── 07_fact_check.md              ← verification pass against raw data
-└── *.log                         ← stderr/debug logs for each phase
+archaeology-out/analysis/
+├── owner__repo1/
+│   ├── 01_structural_survey.md    ← repo vitals, activity clusters, phases
+│   ├── 02_branches.md             ← per-branch intent analysis
+│   └── 03_commits.md              ← branch-aware commit narratives
+├── owner__repo2/
+│   ├── 01_structural_survey.md
+│   ├── 02_branches.md
+│   └── 03_commits.md
+├── 06_dev_log.md                  ← cross-repo synthesis (first-person retrospective)
+└── 07_fact_check.md               ← verification pass against raw data
 ```
 
 ## Pipeline phases
 
-### Phase 1 — Structural Survey
-Reads the manifest and timeline. Identifies date ranges, activity clusters, quiet periods, and apparent phases of work. Pure scaffolding for later phases.
+**Phases 1-3 run per repo in isolation:**
 
-### Phase 2 — Branch Topology
-The heart of the pipeline. For every branch:
-- Where it forked from and when
-- Whether it has a PR (strongest intent signal)
-- What the branch name and first commits suggest about purpose
-- Whether it was merged, abandoned, or is still dangling
+1. **Structural Survey** — Date ranges, activity clusters, quiet periods, apparent phases of work.
+2. **Branch Topology** — For every branch: evidence of intent (PR, name, commits), best guess at purpose, outcome (merged/abandoned/open), orphan analysis.
+3. **Commit Narratives** — Branch-by-branch walkthrough of commits with addition/deletion stats. Development narrative as a sequence of branches, not commits.
 
-Special attention to **orphan branches** — no PR, never merged. These are the abandoned experiments and false starts that often tell the most interesting story.
+**Phases 6-7 run across all repos:**
 
-### Phase 3 — Branch-Aware Commit Narratives
-Walks through diffs **branch by branch**, not chronologically. For each branch: what was the goal, how do the commits advance it, were there mid-branch pivots. Merge commits on the default branch are noted as integration points.
+6. **Synthesis** — First-person retrospective dev log covering all repos. Per-repo narratives plus cross-repo threads (context switches, shared patterns). Inferences clearly marked with `[inferred]` tags.
+7. **Fact-Check** — Verification pass catching wrong dates, misattributed commits, gaps, and overconfident claims.
 
-### Phase 4 — Notes Cross-Reference
-Matches daily notes to development activity by date. Looks for connections: does a note explain a commit? Express frustration matching a revert? Mention a decision that shows up as a PR? Notes on days with no commits suggest planning or blocked time.
+## Derivation step
 
-### Phase 5 — Claude Logs
-If Claude Code conversation logs are found, these are the most direct evidence of intent. They reveal what the developer was asking about, what approaches they considered, where they got stuck.
+Before Claude sees anything, the derive step extracts from the flat log:
 
-### Phase 6 — Synthesis
-Combines all prior analysis into a first-person retrospective dev log. Branches are the structural backbone. Inferences are clearly marked with `[inferred]` tags. Reads like a thoughtful blog post, not a formal report.
-
-### Phase 7 — Fact-Check
-Sends Claude back to the raw data to verify dates, sequences, and claims. Catches where the narrative drifted from evidence and flags gaps.
-
-## Finding Claude Code logs
-
-The extraction script checks several known locations:
-
-- `~/.claude/projects/<project>/conversations/` — per-project conversation history
-- `~/.claude/logs/` — general Claude Code logs
-- `<repo>/.claude/` — project-local Claude config/logs
-
-Logs are typically JSONL format. If you know of other log locations, pass them as additional search directories or symlink them into one of the above paths.
-
-## Tips
-
-- **Run `branches.py` before `extract.py`** so diff sampling is branch-aware.
-- **`--skip-to` is your friend.** Read the output of each phase before running the next. You might want to manually edit the structural survey before it gets baked into later phases.
-- **Model selection matters.** Phases 1 and 4 (structural survey, notes cross-ref) are good Haiku candidates. Phases 2, 3, and 6 (branches, commit narrative, synthesis) benefit from Sonnet's deeper reasoning.
-- **`--max-diffs`** controls API calls and context size. 30 is a good default. For very large repos, consider 50+ but watch for context window limits.
-- **Orphan branches** are often the most interesting part of the dev log. They're the things you tried and walked away from.
-- **The dev log is a draft.** The pipeline produces a starting point for you to edit. The fact-check phase is there to keep it honest, but your memory fills in what no amount of data mining can recover.
+- **Branch topology** per repo (grouping commits by branch, matching PRs by head_branch)
+- **Branch classification** via name heuristics (feat/, fix/, claude/, experiment/, etc.)
+- **Orphan detection** (branches with no PR and not merged)
+- **Lifespan calculation** (first to last commit per branch)
+- **Day-clustered timelines** (per-repo and global)
+- **Per-repo manifests** with stats
 
 ## Limitations
 
-- GitHub API rate limits apply. The token gets you 5,000 requests/hour, which is plenty for most projects but may throttle very large repos.
-- The compare API can't find fork points for branches that have been heavily rebased.
-- Daily notes matching is date-based only — if your notes don't have dates in the filename, it falls back to file modification time.
-- Claude Code logs aren't guaranteed to exist or be in a consistent format across versions.
-- Diffs are truncated to ~8KB each to fit within context limits. Very large commits lose their tails.
+- No fork-point detection — we don't know where branches diverged, only what commits they contain.
+- Branch-to-commit mapping depends on what the log tool provides. Commits without a branch field are grouped under `(no branch)`.
+- Diffs/file contents are not included — analysis relies on commit messages, addition/deletion counts, and PR bodies.
+- Claude pipeline phases run sequentially. Long runs with many repos can take a while.
