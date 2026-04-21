@@ -16,10 +16,13 @@ const isCommand = commandName != null && commandName in COMMANDS;
 const commandArgs = isCommand ? rawArgs.slice(1) : rawArgs;
 if (!isCommand) commandName = undefined;
 
-// Legacy compat: bare file path implies "analyze"
-if (!commandName && rawArgs.length > 0 && !rawArgs[0].startsWith("-")) {
-  commandName = "analyze";
-}
+const USAGE = `Usage: archaeology <command> [options]
+
+Commands:
+  derive   <log.json>   Parse log and write derived data
+  analyze  <log.json>   Run Claude analysis pipeline
+  status                Check running processes`
+
 
 if (!commandName) {
   if (interactive) {
@@ -38,14 +41,7 @@ if (!commandName) {
     }
     commandName = selected as CommandName;
   } else {
-    console.error(
-      `Usage: archaeology <command> [options]
-
-Commands:
-  derive   <log.json>   Parse log and write derived data
-  analyze  <log.json>   Run Claude analysis pipeline
-  status                Check running processes`
-    );
+    console.error(USAGE);
     process.exit(1);
   }
 }
@@ -53,6 +49,7 @@ Commands:
 const loader = COMMANDS[commandName as CommandName];
 if (!loader) {
   console.error(`Unknown command: ${commandName}`);
+  console.error(USAGE);
   process.exit(1);
 }
 
