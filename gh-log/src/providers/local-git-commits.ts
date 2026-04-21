@@ -4,13 +4,16 @@ import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Octokit } from "octokit";
-import type { CommitEntry, DateRange, CommitProvider } from "../types.js";
+import type { CommitEntry, DateRange, BranchBase } from "../types.js";
+import { BranchBaseSchema } from "../types.js";
 import type { Cache } from "../cache.js";
 import { discoverCommitRepos } from "../github/repos.js";
 import { batch } from "../utils.js";
 
 const execFile = promisify(execFileCb);
 const BranchSchema = z.string().nullable();
+const DefaultBranchSchema = z.string().nullable();
+const NullableBranchBaseSchema = BranchBaseSchema.nullable();
 
 export async function partitionCloned(
   clonesDir: string,
@@ -31,7 +34,7 @@ export async function partitionCloned(
   return { cloned, missing };
 }
 
-export class LocalGitCommitProvider implements CommitProvider {
+export class LocalGitCommitProvider {
   private clonesDir: string;
   private octokit: Octokit | null;
   private repos: string[];
@@ -61,6 +64,7 @@ export class LocalGitCommitProvider implements CommitProvider {
         commits.push({ ...c, repo });
       }
       await this.resolveBranches(repoDir, repo, commits);
+      await this.resolveBranchBases(repoDir, repo, commits);
     }
 
     return commits;
@@ -146,6 +150,92 @@ export class LocalGitCommitProvider implements CommitProvider {
     });
   }
 
+  private async resolveDefaultBranch(
+    repoDir: string,
+    repo: string,
+  ): Promise<string | null> {
+    return this.cache.memo(
+      `default-branch:${repo}`,
+      DefaultBranchSchema,
+      async () => {
+        try {
+          const { stdout } = await execFile(
+            "git",
+            ["symbolic-ref", "refs/remotes/origin/HEAD"],
+            { cwd: repoDir },
+          );
+          const ref = stdout.trim();
+          return ref.replace(/^refs\/remotes\/origin\//, "") || null;
+        } catch {
+          return null;
+        }
+      },
+    );
+  }
+
+  private async resolveBranchBases(
+    repoDir: string,
+    repo: string,
+    commits: CommitEntry[],
+  ): Promise<void> {
+    const forRepo = commits.filter((c) => c.repo === repo && c.branch);
+    if (forRepo.length === 0) return;
+
+    const defaultBranch = await this.resolveDefaultBranch(repoDir, repo);
+    if (!defaultBranch) return;
+
+    const uniqueBranches = [
+      ...new Set(forRepo.map((c) => c.branch!).filter((b) => b !== defaultBranch)),
+    ];
+
+    const perBranch = new Map<string, BranchBase | null>();
+
+    await batch(uniqueBranches, 10, async (branch) => {
+      const base = await this.cache.memo(
+        `branch-base:${repo}@${branch}`,
+        NullableBranchBaseSchema,
+        async () => {
+          try {
+            const head = `refs/remotes/origin/${branch}`;
+            const base = `refs/remotes/origin/${defaultBranch}`;
+            const { stdout: baseSha } = await execFile(
+              "git",
+              ["merge-base", head, base],
+              { cwd: repoDir },
+            );
+            const sha = baseSha.trim();
+            if (!sha) return null;
+            const { stdout: dateOut } = await execFile(
+              "git",
+              ["show", "-s", "--format=%aI", sha],
+              { cwd: repoDir },
+            );
+            const { stdout: countOut } = await execFile(
+              "git",
+              ["rev-list", "--count", `${sha}..${head}`],
+              { cwd: repoDir },
+            );
+            return {
+              sha,
+              date: dateOut.trim(),
+              ahead: Number(countOut.trim()) || 0,
+            };
+          } catch {
+            return null;
+          }
+        },
+      );
+      perBranch.set(branch, base);
+      return branch;
+    });
+
+    for (const c of forRepo) {
+      if (!c.branch || c.branch === defaultBranch) continue;
+      const base = perBranch.get(c.branch);
+      if (base) c.branch_base = base;
+    }
+  }
+
   private async gitLog(
     repoDir: string,
     repoName: string,
@@ -209,6 +299,7 @@ export class LocalGitCommitProvider implements CommitProvider {
         additions,
         deletions,
         branch: null,
+        branch_base: null,
       });
     }
 

@@ -2,21 +2,22 @@ import { writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { requireToken, createOctokit } from "../github/client.js";
 import { fetchPrs } from "../github/prs.js";
-import { GitHubCommitProvider } from "../providers/github-commits.js";
 import {
   LocalGitCommitProvider,
   partitionCloned,
 } from "../providers/local-git-commits.js";
 import { discoverCommitRepos } from "../github/repos.js";
-import { enrichCommitsBranchFromPrs } from "../github/commit-branches.js";
 import { parseDateRange } from "../utils.js";
 import { Cache } from "../cache.js";
 import { runInteractive } from "./log-interactive.js";
-import type { LogOutput, CommitProvider } from "../types.js";
+import type { LogOutput } from "../types.js";
 
 const DEFAULT_CACHE_FILE = ".cache/gh-log.json";
 
 const HELP = `gh-log log — timestamped GitHub PR + commit log
+
+Commit data is always pulled from local git clones; PRs and repo discovery
+use the GitHub API.
 
 Usage:
   gh-log log [options]                      # interactive (default when --out is omitted)
@@ -33,11 +34,10 @@ Date range (defaults to last 3 months):
   --start=<YYYY-MM-DD>    Start date (paired with --end).
   --end=<YYYY-MM-DD>      End date (paired with --start).
 
-Commit source:
-  --source=<github|local> Where commit data comes from. Default: github.
+Local clones:
   --clones-dir=<path>     Where local clones live. Default: ./clones.
   --repos=<a/b,c/d>       Comma-separated repo list (skips GitHub discovery).
-  --no-clone              Local mode: skip repos not already cloned.
+  --no-clone              Skip repos not already cloned.
 
 Cache:
   --cache-file=<path>     Cache location. Default: .cache/gh-log.json.
@@ -50,7 +50,7 @@ Environment:
 Examples:
   gh-log log                                          # interactive
   gh-log log --out=tmp/log.json --months=6
-  gh-log log --out=tmp/log.json --source=local --no-clone
+  gh-log log --out=tmp/log.json --no-clone
   gh-log log --clear-cache --out=tmp/log.json
 `;
 
@@ -63,7 +63,6 @@ export async function run(argv: string[]): Promise<void> {
       end: { type: "string" },
       out: { type: "string", short: "o" },
       user: { type: "string", short: "u" },
-      source: { type: "string" },
       "clones-dir": { type: "string" },
       repos: { type: "string" },
       "no-clone": { type: "boolean" },
@@ -106,7 +105,6 @@ export async function run(argv: string[]): Promise<void> {
         end: values.end,
         out: values.out,
         user: values.user,
-        source: values.source,
         clonesDir: values["clones-dir"],
         repos: values.repos,
         noClone: values["no-clone"] === true,
@@ -117,12 +115,6 @@ export async function run(argv: string[]): Promise<void> {
     );
     await cache.save();
     return;
-  }
-
-  const source = values.source ?? "github";
-  if (source !== "github" && source !== "local") {
-    console.error("--source must be 'github' or 'local'");
-    process.exit(1);
   }
 
   const token = requireToken();
@@ -141,49 +133,39 @@ export async function run(argv: string[]): Promise<void> {
     `Fetching activity for ${user} from ${range.since} to ${range.until}...`,
   );
 
-  let commitProvider: CommitProvider;
-  let repoFilter: Set<string> | null = null;
-  if (source === "local") {
-    const clonesDir = values["clones-dir"] ?? "./clones";
-    let repos = values.repos?.split(",").filter(Boolean);
-    if (!repos?.length) {
-      repos = await discoverCommitRepos(octokit, user, range, cache);
-    }
-    if (values["no-clone"]) {
-      const { cloned, missing } = await partitionCloned(clonesDir, repos);
-      if (missing.length) {
-        console.error(
-          `[local] --no-clone: skipping ${missing.length} uncloned repos`,
-        );
-      }
-      repos = cloned;
-    }
-    repoFilter = new Set(repos);
-    commitProvider = new LocalGitCommitProvider({
-      clonesDir,
-      repos,
-      cache,
-    });
-  } else {
-    commitProvider = new GitHubCommitProvider(octokit, cache);
+  const clonesDir = values["clones-dir"] ?? "./clones";
+  let repos = values.repos?.split(",").filter(Boolean);
+  if (!repos?.length) {
+    repos = await discoverCommitRepos(octokit, user, range, cache);
   }
+  if (values["no-clone"]) {
+    const { cloned, missing } = await partitionCloned(clonesDir, repos);
+    if (missing.length) {
+      console.error(
+        `[local] --no-clone: skipping ${missing.length} uncloned repos`,
+      );
+    }
+    repos = cloned;
+  }
+  const repoFilter = new Set(repos);
+
+  const commitProvider = new LocalGitCommitProvider({
+    clonesDir,
+    octokit,
+    repos,
+    cache,
+  });
 
   const [allPrs, commits] = await Promise.all([
     fetchPrs(octokit, user, range, cache),
     commitProvider.fetchCommits(user, range),
   ]);
 
-  const prs = repoFilter
-    ? allPrs.filter((p) => repoFilter!.has(p.repo))
-    : allPrs;
-  if (repoFilter && prs.length < allPrs.length) {
+  const prs = allPrs.filter((p) => repoFilter.has(p.repo));
+  if (prs.length < allPrs.length) {
     console.error(
       `[local] filtered out ${allPrs.length - prs.length} PRs from unanalyzed repos`,
     );
-  }
-
-  if (source === "github") {
-    await enrichCommitsBranchFromPrs(octokit, commits, prs, cache);
   }
 
   const entries = [...prs, ...commits].sort((a, b) =>

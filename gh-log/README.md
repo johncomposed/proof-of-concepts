@@ -2,6 +2,8 @@
 
 A small CLI for pulling a timestamped JSON log of your GitHub activity (PRs + commits) and turning it into per-day/week/month markdown. Commands are subcommands under a single `gh-log` entry point — each one has both a non-interactive flag-driven mode and an interactive [clack](https://github.com/natemoo-re/clack) flow that kicks in when required args are omitted.
 
+**Commit data comes from local git clones.** PRs and repo discovery are fetched from the GitHub API, but commit walking is always done locally — `gh-log` clones each repo (or fetches if already present) and parses `git log` directly. This makes the tool richer (real branch names via `git name-rev`, merge-base divergence via `git merge-base`) and cheaper (no per-commit API calls) at the cost of disk space for clones.
+
 ## Setup
 
 ```bash
@@ -44,14 +46,11 @@ pnpm dev -- log --months=3 --out=tmp/log.json
 pnpm dev -- log --start=2026-01-01 --end=2026-04-21 --out=tmp/log.json
 pnpm dev -- log --months=6 --user=johncomposed --out=tmp/log.json
 
-# local git clones instead of the GitHub API for commit data
-pnpm dev -- log --months=3 --source=local --out=tmp/log.json
+# only look at repos already cloned locally (skip new clones)
+pnpm dev -- log --months=3 --no-clone --out=tmp/log.json
 
-# only look at repos already cloned locally
-pnpm dev -- log --months=3 --source=local --no-clone --out=tmp/log.json
-
-# explicit repo list (skips GitHub repo discovery in local mode)
-pnpm dev -- log --source=local --repos=johncomposed/hourglass,johncomposed/gh-log --out=tmp/log.json
+# explicit repo list (skips GitHub repo discovery)
+pnpm dev -- log --repos=johncomposed/hourglass,johncomposed/gh-log --out=tmp/log.json
 ```
 
 Omitting `--out` drops into the interactive flow. After an interactive run completes, the equivalent non-interactive command is printed so you can repeat the run without prompts.
@@ -65,21 +64,22 @@ Omitting `--out` drops into the interactive flow. After an interactive run compl
 | `--start` | Start date `YYYY-MM-DD`. Pair with `--end`. |
 | `--end` | End date `YYYY-MM-DD`. Pair with `--start`. |
 | `--user`, `-u` | GitHub login to query. Defaults to the authenticated user. |
-| `--source` | `github` (default) or `local`. PRs are always from GitHub. |
-| `--clones-dir` | Directory for local git clones. Default `./clones`. Local mode only. |
-| `--repos` | Comma-separated `owner/repo` list (skips GitHub repo discovery in local mode). |
-| `--no-clone` | Local mode: skip repos that aren't already cloned. |
+| `--clones-dir` | Directory for local git clones. Default `./clones`. |
+| `--repos` | Comma-separated `owner/repo` list (skips GitHub repo discovery). |
+| `--no-clone` | Skip repos that aren't already cloned. |
 | `--interactive`, `-i` | Force interactive mode even when `--out` is set. |
 | `--cache-file` | Cache location. Default `.cache/gh-log.json`. |
 | `--no-cache` | Disable cache reads/writes for this run. |
 | `--clear-cache` | Wipe the cache file, then run. |
 
-### Commit sources
+### How commit data is gathered
 
-- **`github`** — uses the GitHub search API for commits, then enriches each with `additions`/`deletions` and resolves branches via PR cross-reference. Simple, but uses your API rate limit.
-- **`local`** — clones each repo into `--clones-dir` (or fetches if already present), then parses `git log --shortstat` locally. Faster for large commit counts once cloned, works offline after the initial clone, and resolves branches via `git name-rev`. Requires `git` on PATH.
+`git` must be on PATH. For each repo in scope, `gh-log`:
 
-Both modes return identical `CommitEntry` shapes (type, timestamp, repo, sha, message, url, additions, deletions, branch).
+1. Clones into `--clones-dir/<owner>/<repo>` (or `git fetch --all` if already cloned; `--no-clone` skips the uncloned).
+2. Runs `git log --all --author=<user> --since --until --shortstat` to collect commits with additions/deletions.
+3. Resolves each commit's branch via `git name-rev` and strips the `origin/` prefix.
+4. For each unique non-default branch, resolves the default branch (`git symbolic-ref refs/remotes/origin/HEAD`), then computes the merge-base with it: `git merge-base`, `git show -s --format=%aI`, `git rev-list --count`. Commits on that branch get a `branch_base: { sha, date, ahead }` stamp describing where the branch diverged from the default.
 
 ### Caching
 
@@ -90,7 +90,7 @@ Every network-heavy step is cached to `.cache/gh-log.json` keyed by a hash of th
 A single JSON file containing PRs and commits merged into one chronologically sorted `entries` array, plus metadata (`user`, `since`, `until`, `generated_at`, `counts`).
 
 - PR entries include `head_branch` and `base_branch`.
-- Commit entries include `additions`, `deletions`, and `branch` (resolved from PR commits in `github` mode, `git name-rev` in `local` mode; `null` if the commit isn't reachable from a named branch).
+- Commit entries include `additions`, `deletions`, `branch` (resolved via `git name-rev`; `null` if unreachable from a named branch), and `branch_base` (`{ sha, date, ahead }` — merge-base with the default branch; `null` for commits on the default branch itself or when the branch can't be resolved).
 
 ## `chunk` — split JSON into markdown
 
@@ -127,16 +127,14 @@ src/
     chunk-interactive.ts        # `chunk` interactive clack flow
   chunk.ts                      # pure chunk/render helpers
   cache.ts                      # schema-hashed, range-aware cache
-  types.ts                      # Zod schemas + shared types + CommitProvider interface
+  types.ts                      # Zod schemas + shared types
   utils.ts                      # batch() + date range parsing
   github/
     client.ts                   # Octokit factory
     prs.ts                      # PR search + branch fields
     repos.ts                    # repo discovery
-    commit-branches.ts          # enrich commits with head_branch via PR commits
   providers/
-    github-commits.ts           # GitHubCommitProvider
-    local-git-commits.ts        # LocalGitCommitProvider
+    local-git-commits.ts        # LocalGitCommitProvider — clone, git log, name-rev, merge-base
 ```
 
 Adding a new subcommand is a two-file drop: `src/commands/<name>.ts` (exports `run(argv)`) plus an optional `src/commands/<name>-interactive.ts`, and one entry in the `COMMANDS` array in `src/cli.ts`.

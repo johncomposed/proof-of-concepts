@@ -6,6 +6,13 @@ export const DateRangeSchema = z.object({
 });
 export type DateRange = z.infer<typeof DateRangeSchema>;
 
+export const BranchBaseSchema = z.object({
+  sha: z.string(),
+  date: z.string(),
+  ahead: z.number(),
+});
+export type BranchBase = z.infer<typeof BranchBaseSchema>;
+
 export const CommitEntrySchema = z.object({
   type: z.literal("commit"),
   timestamp: z.string(),
@@ -16,12 +23,9 @@ export const CommitEntrySchema = z.object({
   additions: z.number().nullable(),
   deletions: z.number().nullable(),
   branch: z.string().nullable(),
+  branch_base: BranchBaseSchema.nullable(),
 });
 export type CommitEntry = z.infer<typeof CommitEntrySchema>;
-
-// Schema for the list of SHAs that belong to a given PR's head branch.
-// Used to map commit sha -> PR head branch on the GitHub side.
-export const ShaListSchema = z.array(z.string());
 
 export const PrEntrySchema = z.object({
   type: z.literal("pr"),
@@ -66,17 +70,7 @@ export const PrBranchesSchema = z.object({
 });
 export type PrBranches = z.infer<typeof PrBranchesSchema>;
 
-export const CommitStatsSchema = z.object({
-  additions: z.number().nullable(),
-  deletions: z.number().nullable(),
-});
-export type CommitStats = z.infer<typeof CommitStatsSchema>;
-
 // Composed list schemas used by outer cache memos
 export const PrEntryListSchema = z.array(PrEntrySchema);
 export const CommitEntryListSchema = z.array(CommitEntrySchema);
 export const RepoListSchema = z.array(z.string());
-
-export interface CommitProvider {
-  fetchCommits(user: string, range: DateRange): Promise<CommitEntry[]>;
-}

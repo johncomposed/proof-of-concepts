@@ -14,14 +14,12 @@ import {
 import { createOctokit, requireToken } from "../github/client.js";
 import { fetchPrs } from "../github/prs.js";
 import { discoverCommitRepos } from "../github/repos.js";
-import { enrichCommitsBranchFromPrs } from "../github/commit-branches.js";
-import { GitHubCommitProvider } from "../providers/github-commits.js";
 import {
   LocalGitCommitProvider,
   partitionCloned,
 } from "../providers/local-git-commits.js";
 import type { Cache } from "../cache.js";
-import type { CommitProvider, DateRange, LogOutput } from "../types.js";
+import type { DateRange, LogOutput } from "../types.js";
 import { z } from "zod";
 
 interface Defaults {
@@ -30,7 +28,6 @@ interface Defaults {
   end?: string;
   out?: string;
   user?: string;
-  source?: string;
   clonesDir?: string;
   repos?: string;
   noClone?: boolean;
@@ -57,8 +54,7 @@ interface ChosenOptions {
   rangeType: "months" | "explicit";
   months?: string;
   range: DateRange;
-  source: "github" | "local";
-  clonesDir?: string;
+  clonesDir: string;
   repos?: string[];
   reposIsExplicitSubset: boolean;
   noClone: boolean;
@@ -78,15 +74,12 @@ function formatCliCommand(opts: ChosenOptions): string {
     args.push(`--end=${opts.range.until}`);
   }
 
-  if (opts.source !== "github") args.push(`--source=${opts.source}`);
-  if (opts.source === "local") {
-    if (opts.clonesDir && opts.clonesDir !== "./clones") {
-      args.push(`--clones-dir=${opts.clonesDir}`);
-    }
-    if (opts.noClone) args.push(`--no-clone`);
-    if (opts.reposIsExplicitSubset && opts.repos?.length) {
-      args.push(`--repos=${opts.repos.join(",")}`);
-    }
+  if (opts.clonesDir !== "./clones") {
+    args.push(`--clones-dir=${opts.clonesDir}`);
+  }
+  if (opts.noClone) args.push(`--no-clone`);
+  if (opts.reposIsExplicitSubset && opts.repos?.length) {
+    args.push(`--repos=${opts.repos.join(",")}`);
   }
 
   if (opts.cacheFile) args.push(`--cache-file=${opts.cacheFile}`);
@@ -182,106 +175,85 @@ export async function runInteractive(
     range = { since, until };
   }
 
-  const source = bail(
-    await select<"github" | "local">({
-      message: "Where to pull commit data from?",
-      options: [
-        {
-          value: "github",
-          label: "GitHub API",
-          hint: "uses rate limit, no clones needed",
-        },
-        {
-          value: "local",
-          label: "Local git clones",
-          hint: "clones repos, parses git log locally",
-        },
-      ],
-      initialValue: (defaults.source as "github" | "local") ?? "github",
-    }),
-  );
-
-  let selectedRepos: string[] | undefined;
   let reposIsExplicitSubset = false;
   let noClone = defaults.noClone ?? false;
   let clonesDir = defaults.clonesDir ?? "./clones";
 
-  if (source === "local") {
-    clonesDir = bail(
-      await text({
-        message: "Clones directory",
-        initialValue: clonesDir,
-      }),
-    );
+  clonesDir = bail(
+    await text({
+      message: "Clones directory",
+      initialValue: clonesDir,
+    }),
+  );
 
-    const s = spinner();
-    s.start(`Discovering repos ${user} committed to`);
-    const hitsBefore = cache.getStats().hits;
-    const discovered = await discoverCommitRepos(octokit, user, range, cache);
-    const fromCache = cache.getStats().hits > hitsBefore;
-    s.stop(
-      `Found ${discovered.length} repos${fromCache ? " (from cache)" : " (from GitHub)"}`,
-    );
+  const s = spinner();
+  s.start(`Discovering repos ${user} committed to`);
+  const hitsBefore = cache.getStats().hits;
+  const discovered = await discoverCommitRepos(octokit, user, range, cache);
+  const fromCache = cache.getStats().hits > hitsBefore;
+  s.stop(
+    `Found ${discovered.length} repos${fromCache ? " (from cache)" : " (from GitHub)"}`,
+  );
 
-    if (discovered.length === 0) {
-      note("No commits found in this range. Exiting.");
-      outro("Done");
-      return;
-    }
+  if (discovered.length === 0) {
+    note("No commits found in this range. Exiting.");
+    outro("Done");
+    return;
+  }
 
-    const { cloned, missing } = await partitionCloned(clonesDir, discovered);
+  const { cloned, missing } = await partitionCloned(clonesDir, discovered);
 
-    note(
-      `${cloned.length} already cloned\n${missing.length} not yet cloned`,
-      "repos",
-    );
+  note(
+    `${cloned.length} already cloned\n${missing.length} not yet cloned`,
+    "repos",
+  );
 
-    let pool: string[];
-    if (missing.length === 0) {
-      pool = cloned;
-    } else {
-      const doClone = bail(
-        await confirm({
-          message: `Clone the ${missing.length} missing repo${missing.length === 1 ? "" : "s"}?`,
-          initialValue: !noClone,
-        }),
-      );
-      if (doClone) {
-        pool = discovered;
-        noClone = false;
-      } else {
-        pool = cloned;
-        noClone = true;
-      }
-    }
-
-    if (pool.length === 0) {
-      note("No repos available. Exiting.");
-      outro("Done");
-      return;
-    }
-
-    const pickSubset = bail(
+  let pool: string[];
+  if (missing.length === 0) {
+    pool = cloned;
+  } else {
+    const doClone = bail(
       await confirm({
-        message: `Pick a subset of the ${pool.length} repo${pool.length === 1 ? "" : "s"}?`,
-        initialValue: false,
+        message: `Clone the ${missing.length} missing repo${missing.length === 1 ? "" : "s"}?`,
+        initialValue: !noClone,
       }),
     );
-
-    if (pickSubset) {
-      const picked = bail(
-        await multiselect<string>({
-          message: "Select repos to include",
-          options: pool.map((r) => ({ value: r, label: r })),
-          initialValues: pool,
-          required: true,
-        }),
-      );
-      selectedRepos = picked;
-      reposIsExplicitSubset = true;
+    if (doClone) {
+      pool = discovered;
+      noClone = false;
     } else {
-      selectedRepos = pool;
+      pool = cloned;
+      noClone = true;
     }
+  }
+
+  if (pool.length === 0) {
+    note("No repos available. Exiting.");
+    outro("Done");
+    return;
+  }
+
+  const pickSubset = bail(
+    await confirm({
+      message: `Pick a subset of the ${pool.length} repo${pool.length === 1 ? "" : "s"}?`,
+      initialValue: false,
+    }),
+  );
+
+  let selectedRepos: string[];
+  if (pickSubset) {
+    const picked = bail(
+      await multiselect<string>({
+        message: "Select repos to include",
+        options: pool.map((r) => ({ value: r, label: r })),
+        initialValues: pool,
+        required: true,
+      }),
+    );
+    selectedRepos = picked;
+    reposIsExplicitSubset = true;
+  } else {
+    selectedRepos = pool;
   }
 
   const out = bail(
@@ -291,10 +263,11 @@ export async function runInteractive(
     }),
   );
 
-  const commitProvider: CommitProvider =
-    source === "local"
-      ? new LocalGitCommitProvider({ clonesDir, repos: selectedRepos, cache })
-      : new GitHubCommitProvider(octokit, cache);
+  const commitProvider = new LocalGitCommitProvider({
+    clonesDir,
+    repos: selectedRepos,
+    cache,
+  });
 
   const statsBefore = cache.getStats();
 
@@ -304,39 +277,25 @@ export async function runInteractive(
   const prsAfter = cache.getStats();
   const prsHit = prsAfter.hits > statsBefore.hits;
 
-  const repoFilter =
-    source === "local" && selectedRepos ? new Set(selectedRepos) : null;
-  const prs = repoFilter
-    ? allPrs.filter((p) => repoFilter.has(p.repo))
-    : allPrs;
+  const repoFilter = new Set(selectedRepos);
+  const prs = allPrs.filter((p) => repoFilter.has(p.repo));
   const dropped = allPrs.length - prs.length;
   prSpin.stop(
     `Fetched ${allPrs.length} PRs${prsHit ? " (from cache)" : " (from GitHub)"}${dropped ? ` — filtered to ${prs.length} matching selected repos` : ""}`,
   );
 
-  const statsBeforeCommits = cache.getStats();
   const commitSpin = spinner();
   commitSpin.start(
-    source === "local"
-      ? noClone
-        ? `Reading git log for ${selectedRepos!.length} cloned repo${selectedRepos!.length === 1 ? "" : "s"}`
-        : `Cloning/fetching ${selectedRepos!.length} repo${selectedRepos!.length === 1 ? "" : "s"} and reading git log`
-      : "Fetching commits",
+    noClone
+      ? `Reading git log for ${selectedRepos.length} cloned repo${selectedRepos.length === 1 ? "" : "s"}`
+      : `Cloning/fetching ${selectedRepos.length} repo${selectedRepos.length === 1 ? "" : "s"} and reading git log`,
   );
   const commits = await commitProvider.fetchCommits(user, range);
-  const commitsAfter = cache.getStats();
-  const commitsHit = commitsAfter.hits > statsBeforeCommits.hits;
+  const withBranch = commits.filter((c) => c.branch).length;
+  const withBase = commits.filter((c) => c.branch_base).length;
   commitSpin.stop(
-    `Fetched ${commits.length} commits${commitsHit && source === "github" ? " (from cache)" : source === "github" ? " (from GitHub)" : ""}`,
+    `Fetched ${commits.length} commits — ${withBranch} with branch, ${withBase} with merge-base`,
   );
-
-  if (source === "github") {
-    const branchSpin = spinner();
-    branchSpin.start("Resolving commit branches from PRs");
-    await enrichCommitsBranchFromPrs(octokit, commits, prs, cache);
-    const withBranch = commits.filter((c) => c.branch).length;
-    branchSpin.stop(`Branch resolved for ${withBranch}/${commits.length} commits`);
-  }
 
   const entries = [...prs, ...commits].sort((a, b) =>
     a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
@@ -368,8 +327,7 @@ export async function runInteractive(
     rangeType,
     months: monthsValue,
     range,
-    source,
-    clonesDir: source === "local" ? clonesDir : undefined,
+    clonesDir,
     repos: selectedRepos,
     reposIsExplicitSubset,
     noClone,
