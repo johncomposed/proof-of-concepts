@@ -9,6 +9,25 @@ import { discoverCommitRepos } from "../github/repos.js";
 
 const execFile = promisify(execFileCb);
 
+export async function partitionCloned(
+  clonesDir: string,
+  repos: string[],
+): Promise<{ cloned: string[]; missing: string[] }> {
+  const cloned: string[] = [];
+  const missing: string[] = [];
+  await Promise.all(
+    repos.map(async (r) => {
+      try {
+        await access(path.join(clonesDir, r));
+        cloned.push(r);
+      } catch {
+        missing.push(r);
+      }
+    }),
+  );
+  return { cloned, missing };
+}
+
 export class LocalGitCommitProvider implements CommitProvider {
   private clonesDir: string;
   private octokit: Octokit | null;

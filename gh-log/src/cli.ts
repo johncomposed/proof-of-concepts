@@ -4,7 +4,11 @@ import { parseArgs } from "node:util";
 import { requireToken, createOctokit } from "./github/client.js";
 import { fetchPrs } from "./github/prs.js";
 import { GitHubCommitProvider } from "./providers/github-commits.js";
-import { LocalGitCommitProvider } from "./providers/local-git-commits.js";
+import {
+  LocalGitCommitProvider,
+  partitionCloned,
+} from "./providers/local-git-commits.js";
+import { discoverCommitRepos } from "./github/repos.js";
 import { parseDateRange } from "./utils.js";
 import { Cache } from "./cache.js";
 import { runInteractive } from "./interactive.js";
@@ -22,12 +26,57 @@ const { values } = parseArgs({
     source: { type: "string" },
     "clones-dir": { type: "string" },
     repos: { type: "string" },
+    "no-clone": { type: "boolean" },
     interactive: { type: "boolean", short: "i" },
     "no-cache": { type: "boolean" },
     "clear-cache": { type: "boolean" },
     "cache-file": { type: "string" },
+    help: { type: "boolean", short: "h" },
   },
 });
+
+const HELP = `gh-log — timestamped GitHub PR + commit log
+
+Usage:
+  gh-log [options]                      # interactive (default when --out is omitted)
+  gh-log --out=<path.json> [options]    # non-interactive
+
+General:
+  -o, --out=<path>        Output JSON file. Omitting this runs the interactive flow.
+  -u, --user=<login>      GitHub login. Defaults to the authenticated user.
+  -i, --interactive       Force interactive mode even when --out is set.
+  -h, --help              Show this message.
+
+Date range (defaults to last 3 months):
+  --months=<n>            Last N months.
+  --start=<YYYY-MM-DD>    Start date (paired with --end).
+  --end=<YYYY-MM-DD>      End date (paired with --start).
+
+Commit source:
+  --source=<github|local> Where commit data comes from. Default: github.
+  --clones-dir=<path>     Where local clones live. Default: ./clones.
+  --repos=<a/b,c/d>       Comma-separated repo list (skips GitHub discovery).
+  --no-clone              Local mode: skip repos not already cloned.
+
+Cache:
+  --cache-file=<path>     Cache location. Default: .cache/gh-log.json.
+  --no-cache              Disable cache reads and writes for this run.
+  --clear-cache           Wipe the cache file, then proceed.
+
+Environment:
+  GITHUB_TOKEN            Required. A \`.env\` file is auto-loaded if present.
+
+Examples:
+  gh-log                                              # interactive, everything prompted
+  gh-log --out=tmp/log.json --months=6
+  gh-log --out=tmp/log.json --source=local --no-clone
+  gh-log --clear-cache --out=tmp/log.json
+`;
+
+if (values.help) {
+  console.log(HELP);
+  process.exit(0);
+}
 
 const cacheFile = values["cache-file"] ?? DEFAULT_CACHE_FILE;
 const cacheDisabled = values["no-cache"] === true;
@@ -60,6 +109,7 @@ if (useInteractive) {
       source: values.source,
       clonesDir: values["clones-dir"],
       repos: values.repos,
+      noClone: values["no-clone"] === true,
       cacheFile: values["cache-file"],
       noCache: cacheDisabled,
     },
@@ -91,10 +141,22 @@ console.error(`Fetching activity for ${user} from ${range.since} to ${range.unti
 
 let commitProvider: CommitProvider;
 if (source === "local") {
-  const repos = values.repos?.split(",").filter(Boolean);
+  const clonesDir = values["clones-dir"] ?? "./clones";
+  let repos = values.repos?.split(",").filter(Boolean);
+  if (!repos?.length) {
+    repos = await discoverCommitRepos(octokit, user, range, cache);
+  }
+  if (values["no-clone"]) {
+    const { cloned, missing } = await partitionCloned(clonesDir, repos);
+    if (missing.length) {
+      console.error(
+        `[local] --no-clone: skipping ${missing.length} uncloned repos`,
+      );
+    }
+    repos = cloned;
+  }
   commitProvider = new LocalGitCommitProvider({
-    clonesDir: values["clones-dir"] ?? "./clones",
-    octokit: repos?.length ? undefined : octokit,
+    clonesDir,
     repos,
     cache,
   });

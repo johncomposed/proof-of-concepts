@@ -10,11 +10,29 @@ const { values } = parseArgs({
     in: { type: "string", short: "i" },
     out: { type: "string", short: "o" },
     by: { type: "string", short: "b" },
+    help: { type: "boolean", short: "h" },
   },
 });
 
+const HELP = `gh-log-chunk — split a gh-log JSON into per-bucket markdown files
+
+Usage:
+  gh-log-chunk --in=<log.json> --out=<dir> --by=<day|week|month>
+
+Options:
+  -i, --in=<path>   Input JSON produced by gh-log.
+  -o, --out=<dir>   Output directory (created if missing).
+  -b, --by=<unit>   Bucket granularity: day, week, or month.
+  -h, --help        Show this message.
+`;
+
+if (values.help) {
+  console.log(HELP);
+  process.exit(0);
+}
+
 if (!values.in || !values.out || !values.by) {
-  console.error("Usage: chunk --in=<log.json> --out=<dir> --by=<day|week|month>");
+  console.error(HELP);
   process.exit(1);
 }
 
