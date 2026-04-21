@@ -26,14 +26,16 @@ function runClaude(
   phase: number,
   phaseName: string,
   outputFile: string,
-  maxTurns: number = 5
+  maxTurns: number
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       "claude",
-      ["--print", "--model", model, "--max-turns", String(maxTurns), "-p", prompt],
-      { stdio: ["ignore", "pipe", "pipe"] }
+      ["--print", "--model", model, "--max-turns", String(maxTurns), "-p", "-"],
+      { stdio: ["pipe", "pipe", "pipe"] }
     );
+
+    child.stdin!.end(prompt);
 
     const pid = child.pid!;
     registerProcess(outputDir, {
@@ -59,7 +61,8 @@ function runClaude(
           exitCode: code,
           error: stderr.slice(0, 500),
         });
-        reject(new Error(`claude exited ${code}: ${stderr.slice(0, 500)}`));
+        const detail = stderr || stdout;
+        reject(new Error(`claude exited ${code}: ${detail.slice(0, 500)}`));
       } else {
         updateProcess(outputDir, pid, {
           status: "done",
@@ -80,18 +83,30 @@ function runClaude(
   });
 }
 
+function maxTurnsForPhase(phase: number, repoCount: number): number {
+  switch (phase) {
+    case 1: return 2;             // no file reads, just respond
+    case 2: return 2;             // no file reads
+    case 3: return 4;             // reads 2 prior analyses
+    case 6: return 3 + repoCount * 3; // reads 3 files per repo + respond
+    case 7: return 4;             // reads dev log + respond
+    default: return 5;
+  }
+}
+
 async function runPhase(
   step: PhaseStep,
   prompt: string,
   model: string,
-  outputDir: string
+  outputDir: string,
+  maxTurns: number
 ): Promise<void> {
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   console.log(`▸ Phase ${step.phase}: ${step.name}`);
   console.log(`  → output: ${step.outputFile}`);
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
-  const result = await runClaude(prompt, model, outputDir, step.phase, step.name, step.outputFile);
+  const result = await runClaude(prompt, model, outputDir, step.phase, step.name, step.outputFile, maxTurns);
   await writeFile(step.outputFile, result, "utf-8");
 
   console.log(`  ✓ Done — ${Buffer.byteLength(result)} bytes written\n`);
@@ -481,14 +496,41 @@ export async function runHarness(
   console.log(`║  Phases:  ${stepsToRun.length} of ${allSteps.length} steps`);
   console.log(`╚══════════════════════════════════════════════════════════╝\n`);
 
+  // Phases 1-3 are per-repo and independent across repos — run in parallel.
+  // Phases 6-7 depend on all repo phases and run sequentially after.
+  const repoSteps = stepsToRun.filter((s) => s.repo);
+  const globalSteps = stepsToRun.filter((s) => !s.repo);
+
+  const byRepo = new Map<string, PhaseStep[]>();
+  for (const step of repoSteps) {
+    const group = byRepo.get(step.repo!) ?? [];
+    group.push(step);
+    byRepo.set(step.repo!, group);
+  }
+
+  // Log skipped steps
   for (const step of allSteps) {
     if (!selectedKeys.has(step.key)) {
       console.log(`⏭  Skipping: ${step.name}`);
-      continue;
     }
+  }
 
+  // Run per-repo pipelines in parallel (phases within each repo stay sequential)
+  await Promise.all(
+    [...byRepo.values()].map(async (steps) => {
+      for (const step of steps) {
+        const prompt = buildPrompt(step, data, repos, analysisDir);
+        const maxTurns = maxTurnsForPhase(step.phase, repos.length);
+        await runPhase(step, prompt, model, opts.outputDir, maxTurns);
+      }
+    })
+  );
+
+  // Run global phases sequentially — they depend on all repo phases
+  for (const step of globalSteps) {
     const prompt = buildPrompt(step, data, repos, analysisDir);
-    await runPhase(step, prompt, model, opts.outputDir);
+    const maxTurns = maxTurnsForPhase(step.phase, repos.length);
+    await runPhase(step, prompt, model, opts.outputDir, maxTurns);
   }
 
   // ── Done ────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ Reconstruct the intent behind old projects by mining Git history, then synthesiz
 
 You feed it a `log.json` file (produced by a separate GitHub log tool) containing commits and PRs across multiple repos. It derives branch topology, classifies branches, detects orphans, then runs a multi-phase Claude analysis pipeline that produces a first-person dev log per repo and a cross-repo synthesis.
 
-The key insight: **branches are the primary unit of intent.** Every branch represents a deliberate decision to diverge. The pipeline treats them as first-class objects.
+One insight: **branches are the primary unit of intent.** Every branch represents a deliberate decision to diverge. The pipeline treats them as first-class objects.
 
 ## Files
 
@@ -190,4 +190,4 @@ Before Claude sees anything, the derive step extracts from the flat log:
 - No fork-point detection — we don't know where branches diverged, only what commits they contain.
 - Branch-to-commit mapping depends on what the log tool provides. Commits without a branch field are grouped under `(no branch)`.
 - Diffs/file contents are not included — analysis relies on commit messages, addition/deletion counts, and PR bodies.
-- Claude pipeline phases run sequentially. Long runs with many repos can take a while.
+- Per-repo analysis (phases 1-3) runs in parallel across repos. Global synthesis phases (6-7) run after all repos finish.
