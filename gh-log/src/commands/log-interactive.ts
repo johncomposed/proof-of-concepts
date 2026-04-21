@@ -11,17 +11,17 @@ import {
   cancel,
   note,
 } from "@clack/prompts";
-import { createOctokit, requireToken } from "./github/client.js";
-import { fetchPrs } from "./github/prs.js";
-import { discoverCommitRepos } from "./github/repos.js";
-import { enrichCommitsBranchFromPrs } from "./github/commit-branches.js";
-import { GitHubCommitProvider } from "./providers/github-commits.js";
+import { createOctokit, requireToken } from "../github/client.js";
+import { fetchPrs } from "../github/prs.js";
+import { discoverCommitRepos } from "../github/repos.js";
+import { enrichCommitsBranchFromPrs } from "../github/commit-branches.js";
+import { GitHubCommitProvider } from "../providers/github-commits.js";
 import {
   LocalGitCommitProvider,
   partitionCloned,
-} from "./providers/local-git-commits.js";
-import type { Cache } from "./cache.js";
-import type { CommitProvider, DateRange, LogOutput } from "./types.js";
+} from "../providers/local-git-commits.js";
+import type { Cache } from "../cache.js";
+import type { CommitProvider, DateRange, LogOutput } from "../types.js";
 import { z } from "zod";
 
 interface Defaults {
@@ -92,7 +92,7 @@ function formatCliCommand(opts: ChosenOptions): string {
   if (opts.cacheFile) args.push(`--cache-file=${opts.cacheFile}`);
   if (opts.noCache) args.push(`--no-cache`);
 
-  return `pnpm dev -- ${args.join(" ")}`;
+  return `pnpm dev -- log ${args.join(" ")}`;
 }
 
 export async function runInteractive(

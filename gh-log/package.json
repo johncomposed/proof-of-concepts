@@ -4,15 +4,14 @@
   "private": true,
   "type": "module",
   "bin": {
-    "gh-log": "./dist/cli.js",
-    "gh-log-chunk": "./dist/cli-chunk.js"
+    "gh-log": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsx --env-file-if-exists=.env src/cli.ts",
-    "dev:chunk": "tsx --env-file-if-exists=.env src/cli-chunk.ts",
-    "log": "node --env-file-if-exists=.env dist/cli.js",
-    "chunk": "node --env-file-if-exists=.env dist/cli-chunk.js"
+    "start": "node --env-file-if-exists=.env dist/cli.js",
+    "log": "tsx --env-file-if-exists=.env src/cli.ts log",
+    "chunk": "tsx --env-file-if-exists=.env src/cli.ts chunk"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",
