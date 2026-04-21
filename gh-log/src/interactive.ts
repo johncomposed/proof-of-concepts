@@ -16,6 +16,7 @@ import { fetchPrs } from "./github/prs.js";
 import { discoverCommitRepos } from "./github/repos.js";
 import { GitHubCommitProvider } from "./providers/github-commits.js";
 import { LocalGitCommitProvider } from "./providers/local-git-commits.js";
+import type { Cache } from "./cache.js";
 import type { CommitProvider, DateRange, LogOutput } from "./types.js";
 
 interface Defaults {
@@ -41,7 +42,10 @@ function toIso(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-export async function runInteractive(defaults: Defaults): Promise<void> {
+export async function runInteractive(
+  defaults: Defaults,
+  cache: Cache,
+): Promise<void> {
   intro("gh-log");
 
   const token = requireToken();
@@ -49,7 +53,10 @@ export async function runInteractive(defaults: Defaults): Promise<void> {
 
   const authSpin = spinner();
   authSpin.start("Authenticating with GitHub");
-  const authedUser = (await octokit.rest.users.getAuthenticated()).data.login;
+  const authedUser = await cache.memo(
+    "auth-user",
+    async () => (await octokit.rest.users.getAuthenticated()).data.login,
+  );
   authSpin.stop(`Signed in as ${authedUser}`);
 
   const user = bail(
@@ -140,7 +147,7 @@ export async function runInteractive(defaults: Defaults): Promise<void> {
 
     const s = spinner();
     s.start(`Discovering repos ${user} committed to`);
-    const repos = await discoverCommitRepos(octokit, user, range);
+    const repos = await discoverCommitRepos(octokit, user, range, cache);
     s.stop(`Found ${repos.length} repos`);
 
     if (repos.length === 0) {
@@ -191,12 +198,12 @@ export async function runInteractive(defaults: Defaults): Promise<void> {
 
   const commitProvider: CommitProvider =
     source === "local"
-      ? new LocalGitCommitProvider({ clonesDir, repos: selectedRepos })
-      : new GitHubCommitProvider(octokit);
+      ? new LocalGitCommitProvider({ clonesDir, repos: selectedRepos, cache })
+      : new GitHubCommitProvider(octokit, cache);
 
   const prSpin = spinner();
   prSpin.start("Fetching PRs from GitHub");
-  const prs = await fetchPrs(octokit, user, range);
+  const prs = await fetchPrs(octokit, user, range, cache);
   prSpin.stop(`Fetched ${prs.length} PRs`);
 
   const commitSpin = spinner();

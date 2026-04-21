@@ -4,6 +4,7 @@ import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { Octokit } from "octokit";
 import type { CommitEntry, DateRange, CommitProvider } from "../types.js";
+import type { Cache } from "../cache.js";
 import { discoverCommitRepos } from "../github/repos.js";
 
 const execFile = promisify(execFileCb);
@@ -12,15 +13,18 @@ export class LocalGitCommitProvider implements CommitProvider {
   private clonesDir: string;
   private octokit: Octokit | null;
   private repos: string[];
+  private cache: Cache;
 
   constructor(opts: {
     clonesDir?: string;
     octokit?: Octokit;
     repos?: string[];
+    cache: Cache;
   }) {
     this.clonesDir = opts.clonesDir ?? "./clones";
     this.octokit = opts.octokit ?? null;
     this.repos = opts.repos ?? [];
+    this.cache = opts.cache;
   }
 
   async fetchCommits(user: string, range: DateRange): Promise<CommitEntry[]> {
@@ -52,7 +56,12 @@ export class LocalGitCommitProvider implements CommitProvider {
       process.exit(1);
     }
 
-    const repos = await discoverCommitRepos(this.octokit, user, range);
+    const repos = await discoverCommitRepos(
+      this.octokit,
+      user,
+      range,
+      this.cache,
+    );
     console.error(`Discovered ${repos.length} repos from GitHub search`);
     return repos;
   }

@@ -6,8 +6,11 @@ import { fetchPrs } from "./github/prs.js";
 import { GitHubCommitProvider } from "./providers/github-commits.js";
 import { LocalGitCommitProvider } from "./providers/local-git-commits.js";
 import { parseDateRange } from "./utils.js";
+import { Cache } from "./cache.js";
 import { runInteractive } from "./interactive.js";
 import type { LogOutput, CommitProvider } from "./types.js";
+
+const DEFAULT_CACHE_FILE = ".cache/gh-log.json";
 
 const { values } = parseArgs({
   options: {
@@ -20,24 +23,41 @@ const { values } = parseArgs({
     "clones-dir": { type: "string" },
     repos: { type: "string" },
     interactive: { type: "boolean", short: "i" },
+    "no-cache": { type: "boolean" },
+    "clear-cache": { type: "boolean" },
+    "cache-file": { type: "string" },
   },
 });
+
+const cacheFile = values["cache-file"] ?? DEFAULT_CACHE_FILE;
+const cache = new Cache(cacheFile, values["no-cache"] === true);
+
+if (values["clear-cache"]) {
+  await cache.clear();
+  console.error(`Cleared cache at ${cacheFile}`);
+}
+
+await cache.load();
 
 // Interactive is the default. Non-interactive is opt-in by passing --out.
 // --interactive forces interactive even when --out is given.
 const useInteractive = values.interactive || !values.out;
 
 if (useInteractive) {
-  await runInteractive({
-    months: values.months,
-    start: values.start,
-    end: values.end,
-    out: values.out,
-    user: values.user,
-    source: values.source,
-    clonesDir: values["clones-dir"],
-    repos: values.repos,
-  });
+  await runInteractive(
+    {
+      months: values.months,
+      start: values.start,
+      end: values.end,
+      out: values.out,
+      user: values.user,
+      source: values.source,
+      clonesDir: values["clones-dir"],
+      repos: values.repos,
+    },
+    cache,
+  );
+  await cache.save();
   process.exit(0);
 }
 
@@ -68,13 +88,14 @@ if (source === "local") {
     clonesDir: values["clones-dir"] ?? "./clones",
     octokit: repos?.length ? undefined : octokit,
     repos,
+    cache,
   });
 } else {
-  commitProvider = new GitHubCommitProvider(octokit);
+  commitProvider = new GitHubCommitProvider(octokit, cache);
 }
 
 const [prs, commits] = await Promise.all([
-  fetchPrs(octokit, user, range),
+  fetchPrs(octokit, user, range, cache),
   commitProvider.fetchCommits(user, range),
 ]);
 
@@ -92,6 +113,7 @@ const output: LogOutput = {
 };
 
 await writeFile(values.out!, JSON.stringify(output, null, 2));
+await cache.save();
 console.error(
   `Wrote ${entries.length} entries (${prs.length} PRs, ${commits.length} commits) to ${values.out}`,
 );
