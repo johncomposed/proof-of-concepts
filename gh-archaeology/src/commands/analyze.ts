@@ -1,7 +1,7 @@
 import * as p from "@clack/prompts";
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { LogOutputSchema } from "../log-types.js";
+import { LogOutputSchema } from "../types.js";
 import { deriveFromLog } from "../derive.js";
 import {
   buildPhaseSteps,
@@ -146,7 +146,7 @@ export async function run(args: string[], ctx: { interactive: boolean }) {
     p.outro("Analysis complete");
   } else {
     if (!logPath) {
-      console.error("Usage: archaeology analyze <log.json> [options]");
+      console.error("Usage: gh-log analyze <log.json> [options]");
       process.exit(1);
     }
 

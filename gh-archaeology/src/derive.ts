@@ -3,14 +3,13 @@ import {
   type LogEntry,
   type CommitEntry,
   type PrEntry,
-} from "./log-types.js";
-import type {
-  DerivedBranch,
-  DerivedRepo,
-  DayCluster,
-  Manifest,
-  RepoManifest,
-  DerivedData,
+  type BranchBase,
+  type DerivedBranch,
+  type DerivedRepo,
+  type DayCluster,
+  type Manifest,
+  type RepoManifest,
+  type DerivedData,
 } from "./types.js";
 
 export type { DerivedBranch, DerivedRepo, DayCluster, Manifest, RepoManifest, DerivedData };
@@ -49,6 +48,24 @@ function classifyBranch(name: string): {
 
 export function repoSlug(repo: string): string {
   return repo.replace("/", "__");
+}
+
+// Pick the branch_base stamp most commits agree on. Every commit on a branch
+// should carry the same stamp, but if they diverge we go with the mode.
+function consensusForkBase(commits: CommitEntry[]): BranchBase | null {
+  const counts = new Map<string, { base: BranchBase; count: number }>();
+  for (const c of commits) {
+    if (!c.branch_base) continue;
+    const key = `${c.branch_base.sha}|${c.branch_base.date}|${c.branch_base.ahead}`;
+    const cur = counts.get(key);
+    if (cur) cur.count++;
+    else counts.set(key, { base: c.branch_base, count: 1 });
+  }
+  let best: { base: BranchBase; count: number } | null = null;
+  for (const v of counts.values()) {
+    if (!best || v.count > best.count) best = v;
+  }
+  return best?.base ?? null;
 }
 
 export function deriveFromLog(log: LogOutput): DerivedData {
@@ -122,6 +139,7 @@ export function deriveFromLog(log: LogOutput): DerivedData {
       const isDefault = branchName === defaultBranch;
       const hasPr = matchedPrs.length > 0;
       const isOrphan = !isDefault && !hasPr && !merged;
+      const forkBase = isDefault ? null : consensusForkBase(sorted);
 
       branches.push({
         name: branchName,
@@ -136,6 +154,7 @@ export function deriveFromLog(log: LogOutput): DerivedData {
         merged,
         hasPr,
         isOrphan,
+        forkBase,
       });
     }
 

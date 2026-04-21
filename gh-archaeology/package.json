@@ -1,17 +1,21 @@
 {
-  "name": "gh-log",
-  "version": "0.2.0",
+  "name": "gh-archaeology",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "bin": {
-    "gh-log": "./dist/cli.js"
+    "gh-archaeology": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "dev": "tsx --env-file-if-exists=.env src/cli.ts",
     "start": "node --env-file-if-exists=.env dist/cli.js",
     "log": "tsx --env-file-if-exists=.env src/cli.ts log",
-    "chunk": "tsx --env-file-if-exists=.env src/cli.ts chunk"
+    "chunk": "tsx --env-file-if-exists=.env src/cli.ts chunk",
+    "derive": "tsx --env-file-if-exists=.env src/cli.ts derive",
+    "analyze": "tsx --env-file-if-exists=.env src/cli.ts analyze",
+    "status": "tsx --env-file-if-exists=.env src/cli.ts status"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",

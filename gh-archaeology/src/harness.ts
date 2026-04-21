@@ -198,17 +198,20 @@ function summarizeBranches(repo: DerivedRepo): string {
       ? `PR: ${b.prs.map((p) => `#${p.number} "${p.title}" (${p.state}${p.merged ? ", merged" : ""})`).join(", ")}`
       : "no PR";
     const msgs = b.commits.slice(0, 10).map((c) => c.message.split("\n")[0]);
-    lines.push(
-      [
-        `### ${b.name}`,
-        `- Commits: ${b.commits.length}`,
-        `- Dates: ${b.firstCommitDate ?? "?"} → ${b.lastCommitDate ?? "?"}${b.lifespanDays != null ? ` (${b.lifespanDays} days)` : ""}`,
-        `- Category: ${b.category || "uncategorized"}`,
-        `- ${prInfo}`,
-        `- Merged: ${b.merged} | Orphan: ${b.isOrphan}`,
-        `- Commit messages: ${msgs.join("; ")}`,
-      ].join("\n")
-    );
+    const forkLine = b.forkBase
+      ? `- Fork point: ${b.forkBase.sha.slice(0, 7)} on ${b.forkBase.date.slice(0, 10)} (${b.forkBase.ahead} commits ahead of default)`
+      : null;
+    const branchBlock = [
+      `### ${b.name}`,
+      `- Commits: ${b.commits.length}`,
+      `- Dates: ${b.firstCommitDate ?? "?"} → ${b.lastCommitDate ?? "?"}${b.lifespanDays != null ? ` (${b.lifespanDays} days)` : ""}`,
+      `- Category: ${b.category || "uncategorized"}`,
+      `- ${prInfo}`,
+      `- Merged: ${b.merged} | Orphan: ${b.isOrphan}`,
+    ];
+    if (forkLine) branchBlock.push(forkLine);
+    branchBlock.push(`- Commit messages: ${msgs.join("; ")}`);
+    lines.push(branchBlock.join("\n"));
   }
   return lines.join("\n\n");
 }
@@ -254,8 +257,6 @@ function buildPrompt(
     : undefined;
 
   if (step.phase === 1 && repo) {
-    const slug = repoSlug(repo.repo);
-    const repoDir = join(analysisDir, slug);
     const repoManifest = {
       repo: repo.repo,
       commitCount: repo.commitCount,
@@ -307,6 +308,7 @@ For EACH branch (excluding the default), write:
 
 ### [branch name]
 - **Dates**: first → last commit
+- **Fork point** (if available): where it diverged from the default branch
 - **Evidence of intent**:
   - PR (if exists): summarize the PR title/body as the clearest statement of purpose
   - Branch name signals: what the naming convention suggests

@@ -5,14 +5,14 @@ import { bucketEntries, renderBucket } from "../chunk.js";
 import type { LogOutput } from "../types.js";
 import { runInteractive } from "./chunk-interactive.js";
 
-const HELP = `gh-log chunk — split a gh-log JSON into per-bucket markdown files
+const HELP = `gh-archaeology chunk — split a log JSON into per-bucket markdown files
 
 Usage:
-  gh-log chunk                                           # interactive
-  gh-log chunk --in=<log.json> --out=<dir> --by=<unit>   # non-interactive
+  gh-archaeology chunk                                           # interactive
+  gh-archaeology chunk --in=<log.json> --out=<dir> --by=<unit>   # non-interactive
 
 Options:
-  -i, --in=<path>     Input JSON produced by \`gh-log log\`.
+  -i, --in=<path>     Input JSON produced by \`gh-archaeology log\`.
   -o, --out=<dir>     Output directory (created if missing).
   -b, --by=<unit>     Bucket granularity: day, week, or month.
       --interactive   Force interactive mode.
@@ -21,7 +21,10 @@ Options:
 Omit any of --in, --out, --by to drop into the interactive flow.
 `;
 
-export async function run(argv: string[]): Promise<void> {
+export async function run(
+  argv: string[],
+  _ctx: { interactive: boolean } = { interactive: false },
+): Promise<void> {
   const { values } = parseArgs({
     args: argv,
     options: {

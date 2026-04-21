@@ -85,14 +85,14 @@ function formatCliCommand(opts: ChosenOptions): string {
   if (opts.cacheFile) args.push(`--cache-file=${opts.cacheFile}`);
   if (opts.noCache) args.push(`--no-cache`);
 
-  return `pnpm dev -- log ${args.join(" ")}`;
+  return `pnpm dev log ${args.join(" ")}`;
 }
 
 export async function runInteractive(
   defaults: Defaults,
   cache: Cache,
 ): Promise<void> {
-  intro("gh-log");
+  intro("gh-archaeology log");
 
   const cacheStats = cache.getStats();
   note(

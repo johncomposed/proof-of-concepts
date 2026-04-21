@@ -1,6 +1,9 @@
-tmp
 node_modules
+dist
 .env
 clones
+tmp
 archaeology-out
+chunks
 .cache
+settings.local.json

@@ -6,6 +6,13 @@ export const DateRangeSchema = z.object({
 });
 export type DateRange = z.infer<typeof DateRangeSchema>;
 
+export const BranchBaseSchema = z.object({
+  sha: z.string(),
+  date: z.string(),
+  ahead: z.number(),
+});
+export type BranchBase = z.infer<typeof BranchBaseSchema>;
+
 export const CommitEntrySchema = z.object({
   type: z.literal("commit"),
   timestamp: z.string(),
@@ -16,12 +23,9 @@ export const CommitEntrySchema = z.object({
   additions: z.number().nullable(),
   deletions: z.number().nullable(),
   branch: z.string().nullable(),
+  branch_base: BranchBaseSchema.nullable(),
 });
 export type CommitEntry = z.infer<typeof CommitEntrySchema>;
-
-// Schema for the list of SHAs that belong to a given PR's head branch.
-// Used to map commit sha -> PR head branch on the GitHub side.
-export const ShaListSchema = z.array(z.string());
 
 export const PrEntrySchema = z.object({
   type: z.literal("pr"),
@@ -66,17 +70,78 @@ export const PrBranchesSchema = z.object({
 });
 export type PrBranches = z.infer<typeof PrBranchesSchema>;
 
-export const CommitStatsSchema = z.object({
-  additions: z.number().nullable(),
-  deletions: z.number().nullable(),
-});
-export type CommitStats = z.infer<typeof CommitStatsSchema>;
-
 // Composed list schemas used by outer cache memos
 export const PrEntryListSchema = z.array(PrEntrySchema);
 export const CommitEntryListSchema = z.array(CommitEntrySchema);
 export const RepoListSchema = z.array(z.string());
 
-export interface CommitProvider {
-  fetchCommits(user: string, range: DateRange): Promise<CommitEntry[]>;
+// ── Derived types (output of the derive step) ──────────────────────
+
+export interface DerivedBranch {
+  name: string;
+  repo: string;
+  commits: CommitEntry[];
+  prs: PrEntry[];
+  firstCommitDate: string | null;
+  lastCommitDate: string | null;
+  lifespanDays: number | null;
+  category: string;
+  topic: string;
+  merged: boolean;
+  hasPr: boolean;
+  isOrphan: boolean;
+  // Fork point vs. the default branch, populated from commit branch_base stamps
+  // (provided by LocalGitCommitProvider's merge-base pass). Null for the
+  // default branch itself or when unresolved.
+  forkBase: BranchBase | null;
+}
+
+export interface DerivedRepo {
+  repo: string;
+  branches: DerivedBranch[];
+  defaultBranch: string | null;
+  commitCount: number;
+  prCount: number;
+  orphanBranches: string[];
+}
+
+export interface DayCluster {
+  date: string;
+  entries: LogEntry[];
+}
+
+export interface Manifest {
+  user: string;
+  since: string;
+  until: string;
+  generatedAt: string;
+  repos: string[];
+  stats: {
+    totalEntries: number;
+    totalDays: number;
+    totalRepos: number;
+    totalBranches: number;
+    dateRange: [string, string] | [];
+  };
+}
+
+export interface RepoManifest {
+  repo: string;
+  slug: string;
+  since: string;
+  until: string;
+  commitCount: number;
+  prCount: number;
+  branchCount: number;
+  orphanCount: number;
+  dateRange: [string, string] | [];
+  activeDays: number;
+}
+
+export interface DerivedData {
+  log: LogOutput;
+  repos: DerivedRepo[];
+  days: DayCluster[];
+  manifest: Manifest;
+  repoManifests: RepoManifest[];
 }

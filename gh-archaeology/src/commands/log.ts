@@ -14,14 +14,14 @@ import type { LogOutput } from "../types.js";
 
 const DEFAULT_CACHE_FILE = ".cache/gh-log.json";
 
-const HELP = `gh-log log — timestamped GitHub PR + commit log
+const HELP = `gh-archaeology log — timestamped GitHub PR + commit log
 
 Commit data is always pulled from local git clones; PRs and repo discovery
 use the GitHub API.
 
 Usage:
-  gh-log log [options]                      # interactive (default when --out is omitted)
-  gh-log log --out=<path.json> [options]    # non-interactive
+  gh-archaeology log [options]                      # interactive (default when --out is omitted)
+  gh-archaeology log --out=<path.json> [options]    # non-interactive
 
 General:
   -o, --out=<path>        Output JSON file. Omitting this runs the interactive flow.
@@ -48,13 +48,16 @@ Environment:
   GITHUB_TOKEN            Required. A \`.env\` file is auto-loaded if present.
 
 Examples:
-  gh-log log                                          # interactive
-  gh-log log --out=tmp/log.json --months=6
-  gh-log log --out=tmp/log.json --no-clone
-  gh-log log --clear-cache --out=tmp/log.json
+  gh-archaeology log                                          # interactive
+  gh-archaeology log --out=tmp/log.json --months=6
+  gh-archaeology log --out=tmp/log.json --no-clone
+  gh-archaeology log --clear-cache --out=tmp/log.json
 `;
 
-export async function run(argv: string[]): Promise<void> {
+export async function run(
+  argv: string[],
+  _ctx: { interactive: boolean } = { interactive: false },
+): Promise<void> {
   const { values } = parseArgs({
     args: argv,
     options: {

@@ -39,11 +39,11 @@ function formatCliCommand(chosen: {
   out: string;
   by: "day" | "week" | "month";
 }): string {
-  return `pnpm dev -- chunk --in=${chosen.in} --out=${chosen.out} --by=${chosen.by}`;
+  return `pnpm dev chunk --in=${chosen.in} --out=${chosen.out} --by=${chosen.by}`;
 }
 
 export async function runInteractive(defaults: Defaults): Promise<void> {
-  intro("gh-log chunk");
+  intro("gh-archaeology chunk");
 
   const inPath = bail(
     await text({

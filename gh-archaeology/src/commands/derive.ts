@@ -2,7 +2,7 @@ import * as p from "@clack/prompts";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { LogOutputSchema } from "../log-types.js";
+import { LogOutputSchema } from "../types.js";
 import { deriveFromLog, repoSlug } from "../derive.js";
 
 export async function run(args: string[], ctx: { interactive: boolean }) {
@@ -35,7 +35,7 @@ export async function run(args: string[], ctx: { interactive: boolean }) {
   }
 
   if (!logPath) {
-    console.error("Usage: archaeology derive <log.json> [-o output-dir]");
+    console.error("Usage: gh-log derive <log.json> [-o output-dir]");
     process.exit(1);
   }
 
