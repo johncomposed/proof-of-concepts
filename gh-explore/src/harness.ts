@@ -1,0 +1,340 @@
+import { execFile } from "node:child_process";
+import { mkdir, writeFile, readdir } from "node:fs/promises";
+import { join, basename } from "node:path";
+import type { DerivedData, DerivedRepo } from "./derive.js";
+
+interface HarnessOptions {
+  outputDir: string;
+  model?: string;
+  skipTo?: number;
+  repoFilter?: string;
+}
+
+function runClaude(
+  prompt: string,
+  model: string,
+  maxTurns: number = 5
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "claude",
+      ["--print", "--model", model, "--max-turns", String(maxTurns), "-p", prompt],
+      { maxBuffer: 10 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) reject(new Error(`claude failed: ${err.message}\n${stderr}`));
+        else resolve(stdout);
+      }
+    );
+  });
+}
+
+async function runPhase(
+  num: number,
+  name: string,
+  outputFile: string,
+  prompt: string,
+  model: string,
+  skipTo: number
+): Promise<void> {
+  if (skipTo > num) {
+    console.log(`⏭  Skipping phase ${num} (${name})`);
+    return;
+  }
+
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`▸ Phase ${num}: ${name}`);
+  console.log(`  → output: ${outputFile}`);
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+
+  const result = await runClaude(prompt, model);
+  await writeFile(outputFile, result, "utf-8");
+
+  console.log(`  ✓ Done — ${Buffer.byteLength(result)} bytes written\n`);
+}
+
+function summarizeBranches(repo: DerivedRepo): string {
+  const lines: string[] = [];
+  for (const b of repo.branches) {
+    const prInfo = b.hasPr
+      ? `PR: ${b.prs.map((p) => `#${p.number} "${p.title}" (${p.state}${p.merged ? ", merged" : ""})`).join(", ")}`
+      : "no PR";
+    const msgs = b.commits.slice(0, 10).map((c) => c.message.split("\n")[0]);
+    lines.push(
+      [
+        `### ${b.name}`,
+        `- Repo: ${b.repo}`,
+        `- Commits: ${b.commits.length}`,
+        `- Dates: ${b.firstCommitDate ?? "?"} → ${b.lastCommitDate ?? "?"}${b.lifespanDays != null ? ` (${b.lifespanDays} days)` : ""}`,
+        `- Category: ${b.category || "uncategorized"}`,
+        `- ${prInfo}`,
+        `- Merged: ${b.merged} | Orphan: ${b.isOrphan}`,
+        `- Commit messages: ${msgs.join("; ")}`,
+      ].join("\n")
+    );
+  }
+  return lines.join("\n\n");
+}
+
+function summarizeTimeline(data: DerivedData): string {
+  const lines: string[] = [];
+  for (const day of data.days) {
+    const commits = day.entries.filter((e) => e.type === "commit");
+    const prs = day.entries.filter((e) => e.type === "pr");
+    lines.push(
+      `${day.date}: ${commits.length} commits, ${prs.length} PRs`
+    );
+  }
+  return lines.join("\n");
+}
+
+export async function runHarness(
+  data: DerivedData,
+  opts: HarnessOptions
+): Promise<void> {
+  const analysisDir = join(opts.outputDir, "analysis");
+  await mkdir(analysisDir, { recursive: true });
+
+  const model = opts.model ?? "claude-sonnet-4-20250514";
+  const skipTo = opts.skipTo ?? 0;
+
+  const repos = opts.repoFilter
+    ? data.repos.filter((r) => r.repo === opts.repoFilter)
+    : data.repos;
+
+  const manifestText = JSON.stringify(data.manifest, null, 2);
+  const timelineSummary = summarizeTimeline(data);
+
+  console.log(`╔══════════════════════════════════════════════════════════╗`);
+  console.log(`║  Project Archaeology — Analysis Pipeline                ║`);
+  console.log(`╠══════════════════════════════════════════════════════════╣`);
+  console.log(`║  Output:  ${opts.outputDir}`);
+  console.log(`║  Repos:   ${repos.map((r) => r.repo).join(", ")}`);
+  console.log(`║  Model:   ${model}`);
+  console.log(`║  Skip to: phase ${skipTo}`);
+  console.log(`╚══════════════════════════════════════════════════════════╝\n`);
+
+  // ── Phase 1: Structural Survey ──────────────────────────────────
+
+  await runPhase(
+    1,
+    "Structural Survey",
+    join(analysisDir, "01_structural_survey.md"),
+    `You are analyzing a software project's history for an archaeology/retrospective dev log.
+
+Here is the project manifest:
+\`\`\`json
+${manifestText}
+\`\`\`
+
+Here is the timeline summary (activity per day):
+\`\`\`
+${timelineSummary}
+\`\`\`
+
+From this data, identify:
+1. The overall date range of activity
+2. Clusters of high activity vs. gaps (quiet periods of 5+ days)
+3. What the commit messages and PR titles suggest about major workstreams or phases
+4. Any notable branch names and what they imply
+
+Output a structured markdown document with:
+- A "Project Vitals" section (date range, total commits, total PRs, repos, contributors)
+- A "Phases of Work" section identifying 3-8 apparent phases with date ranges and one-line descriptions
+- An "Open Questions" section listing things that aren't clear from structure alone
+
+Be concise. This is a scaffolding document that later analysis will flesh out.`,
+    model,
+    skipTo
+  );
+
+  // ── Phase 2: Branch Topology (per repo) ─────────────────────────
+
+  for (const repo of repos) {
+    const branchSummary = summarizeBranches(repo);
+    const slug = repo.repo.replace("/", "__");
+
+    await runPhase(
+      2,
+      `Branch Topology: ${repo.repo}`,
+      join(analysisDir, `02_branches_${slug}.md`),
+      `You are analyzing the branch topology of ${repo.repo} for a retrospective dev log.
+The goal: every branch represents a deliberate decision to diverge. Figure out WHY.
+
+Here is the branch data (${repo.branches.length} branches, ${repo.commitCount} commits, ${repo.prCount} PRs):
+
+${branchSummary}
+
+Orphan branches (no PR, not merged): ${repo.orphanBranches.join(", ") || "none"}
+
+For EACH branch (excluding the default), write:
+
+### [branch name]
+- **Dates**: first → last commit
+- **Evidence of intent**:
+  - PR (if exists): summarize the PR title/body as the clearest statement of purpose
+  - Branch name signals: what the naming convention suggests
+  - First 2-3 commit messages: what the initial work was
+- **Best guess why this branch exists**: 1-2 sentences synthesizing all evidence
+- **Outcome**: merged / abandoned / still open
+- **Confidence**: high (has PR with description) / medium (name + commits tell a story) / low (unclear)
+
+Then write summary sections:
+
+### Branch Patterns
+- Common naming conventions used
+- Typical branch lifespan
+- Ratio of branches that got merged vs abandoned
+
+### Orphan Branches (no PR, not merged)
+These are the most interesting archaeologically. For each, speculate on what happened.
+
+### Branch Timeline
+List branches chronologically by first commit date, showing overlapping work.
+
+Output as markdown.`,
+      model,
+      skipTo
+    );
+  }
+
+  // ── Phase 3: Branch-Aware Commit Narratives (per repo) ──────────
+
+  for (const repo of repos) {
+    const slug = repo.repo.replace("/", "__");
+    const surveyPath = join(analysisDir, "01_structural_survey.md");
+    const branchAnalysisPath = join(analysisDir, `02_branches_${slug}.md`);
+
+    const commitDetails = repo.branches
+      .map((b) => {
+        const commitLines = b.commits.map(
+          (c) =>
+            `  - ${c.sha.slice(0, 8)} ${c.timestamp.slice(0, 10)} [+${c.additions ?? "?"}/-${c.deletions ?? "?"}] ${c.message.split("\n")[0]}`
+        );
+        return `### ${b.name} (${b.commits.length} commits)\n${commitLines.join("\n")}`;
+      })
+      .join("\n\n");
+
+    await runPhase(
+      3,
+      `Branch-Aware Commits: ${repo.repo}`,
+      join(analysisDir, `03_commits_${slug}.md`),
+      `You are analyzing the commit history of ${repo.repo} for a retrospective dev log.
+IMPORTANT: commits must be understood in the context of their BRANCH, not just their timestamp.
+
+Read these analysis files for context:
+- Structural survey: ${surveyPath}
+- Branch analysis: ${branchAnalysisPath}
+
+Here are the commits grouped by branch, with addition/deletion counts:
+
+${commitDetails}
+
+Walk through the work BRANCH BY BRANCH (not purely chronological). For each branch:
+
+1. State the branch's inferred purpose (from the branch analysis)
+2. Walk through its commits in order, noting:
+   - What changed (from additions/deletions counts and commit message)
+   - How it advances (or doesn't) the branch's apparent goal
+   - Any mid-branch pivots or surprises
+3. If the branch was merged, note what the main branch looked like before and after
+
+For the default branch, separate:
+- Direct commits (work done straight on main — why no branch?)
+- Merge commits (mark which branch they brought in)
+
+End with a "Development Narrative" section that tells the story as a sequence of
+branches, not a sequence of commits.
+
+Output as markdown.`,
+      model,
+      skipTo
+    );
+  }
+
+  // ── Phase 6: Synthesis — The Dev Log ────────────────────────────
+
+  const analysisFiles = (await readdir(analysisDir))
+    .filter((f) => f.match(/^0[1-5].*\.md$/))
+    .map((f) => join(analysisDir, f));
+
+  await runPhase(
+    6,
+    "Synthesis — Dev Log",
+    join(analysisDir, "06_dev_log.md"),
+    `You are writing a retrospective dev log — the final synthesis of a project archaeology effort.
+
+Read ALL of these analysis documents for context:
+${analysisFiles.map((f) => `- ${f}`).join("\n")}
+
+Now write a dev log in FIRST PERSON RETROSPECTIVE voice ("I started by...", "At this point I was trying to..."). This should read like a thoughtful blog post or project postmortem.
+
+Structure:
+1. **Overview**: What was this project? What was I trying to build? (1 paragraph)
+2. **Phases**: Break the work into named phases. For each:
+   - What I was doing and why
+   - Key decisions and what drove them
+   - What worked, what didn't, what I abandoned
+   Use BRANCHES as the primary structural unit within phases — each branch was a deliberate
+   decision to start a workstream. Orphan branches deserve special attention.
+3. **Threads**: Any recurring themes, patterns, or tensions across the project
+4. **Retrospective**: What I'd do differently with hindsight
+
+Rules:
+- CLEARLY MARK anything that's inference vs. hard evidence. Use "[inferred]" tags.
+- Where only code stats exist, say "based on the commits, it appears that..."
+- Keep it honest — if something is unclear, say so. Gaps in the record are part of the story.
+- Aim for the tone of a developer writing for other developers, not a formal report.
+
+Output as a complete markdown document.`,
+    model,
+    skipTo
+  );
+
+  // ── Phase 7: Fact-Check Pass ────────────────────────────────────
+
+  const devLogPath = join(analysisDir, "06_dev_log.md");
+
+  await runPhase(
+    7,
+    "Fact-Check Pass",
+    join(analysisDir, "07_fact_check.md"),
+    `You are doing a fact-check and quality pass on a retrospective dev log.
+
+Read the dev log: ${devLogPath}
+
+Here is the raw manifest for verification:
+\`\`\`json
+${manifestText}
+\`\`\`
+
+And the timeline summary:
+\`\`\`
+${timelineSummary}
+\`\`\`
+
+Produce a SHORT review document:
+1. Any factual errors (wrong dates, misattributed commits, incorrect sequences)
+2. Places where the narrative makes confident claims that should be marked [inferred]
+3. Gaps — important events in the timeline that the narrative skipped
+4. Suggestions for the strongest 2-3 improvements
+
+Be terse. This is a checklist, not a rewrite.`,
+    model,
+    skipTo
+  );
+
+  // ── Done ────────────────────────────────────────────────────────
+
+  const outputFiles = (await readdir(analysisDir)).filter((f) => f.endsWith(".md"));
+
+  console.log(`╔══════════════════════════════════════════════════════════╗`);
+  console.log(`║  ✓ Pipeline complete                                    ║`);
+  console.log(`╠══════════════════════════════════════════════════════════╣`);
+  for (const f of outputFiles) {
+    console.log(`║    ${f}`);
+  }
+  console.log(`║`);
+  console.log(`║  Dev log: ${join(analysisDir, "06_dev_log.md")}`);
+  console.log(`║  Review:  ${join(analysisDir, "07_fact_check.md")}`);
+  console.log(`╚══════════════════════════════════════════════════════════╝`);
+}
