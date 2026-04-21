@@ -113,12 +113,16 @@ export async function runInteractive(
 
   const authSpin = spinner();
   authSpin.start("Authenticating with GitHub");
+  const hitsBeforeAuth = cache.getStats().hits;
   const authedUser = await cache.memo(
     "auth-user",
     z.string(),
     async () => (await octokit.rest.users.getAuthenticated()).data.login,
   );
-  authSpin.stop(`Signed in as ${authedUser}`);
+  const authFromCache = cache.getStats().hits > hitsBeforeAuth;
+  authSpin.stop(
+    `Signed in as ${authedUser}${authFromCache ? " (from cache)" : ""}`,
+  );
 
   const user = bail(
     await text({
@@ -211,8 +215,12 @@ export async function runInteractive(
 
     const s = spinner();
     s.start(`Discovering repos ${user} committed to`);
+    const hitsBefore = cache.getStats().hits;
     const discovered = await discoverCommitRepos(octokit, user, range, cache);
-    s.stop(`Found ${discovered.length} repos`);
+    const fromCache = cache.getStats().hits > hitsBefore;
+    s.stop(
+      `Found ${discovered.length} repos${fromCache ? " (from cache)" : " (from GitHub)"}`,
+    );
 
     if (discovered.length === 0) {
       note("No commits found in this range. Exiting.");
