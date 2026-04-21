@@ -1,9 +1,10 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdir, writeFile, readdir } from "node:fs/promises";
-import { join, basename } from "node:path";
+import { join } from "node:path";
+import { registerProcess, updateProcess } from "./processes.js";
 import type { DerivedData, DerivedRepo } from "./derive.js";
 
-interface HarnessOptions {
+export interface HarnessOptions {
   outputDir: string;
   model?: string;
   skipTo?: number;
@@ -13,18 +14,61 @@ interface HarnessOptions {
 function runClaude(
   prompt: string,
   model: string,
+  outputDir: string,
+  phase: number,
+  phaseName: string,
+  outputFile: string,
   maxTurns: number = 5
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(
+    const child = spawn(
       "claude",
       ["--print", "--model", model, "--max-turns", String(maxTurns), "-p", prompt],
-      { maxBuffer: 10 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        if (err) reject(new Error(`claude failed: ${err.message}\n${stderr}`));
-        else resolve(stdout);
-      }
+      { stdio: ["ignore", "pipe", "pipe"] }
     );
+
+    const pid = child.pid!;
+    registerProcess(outputDir, {
+      pid,
+      phase,
+      name: phaseName,
+      outputFile,
+      startedAt: new Date().toISOString(),
+      status: "running",
+    });
+
+    const chunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    child.stdout.on("data", (d: Buffer) => chunks.push(d));
+    child.stderr.on("data", (d: Buffer) => errChunks.push(d));
+
+    child.on("close", (code) => {
+      const stdout = Buffer.concat(chunks).toString();
+      const stderr = Buffer.concat(errChunks).toString();
+      if (code !== 0) {
+        updateProcess(outputDir, pid, {
+          status: "failed",
+          exitCode: code,
+          error: stderr.slice(0, 500),
+        });
+        reject(new Error(`claude exited ${code}: ${stderr.slice(0, 500)}`));
+      } else {
+        updateProcess(outputDir, pid, {
+          status: "done",
+          exitCode: 0,
+          bytes: Buffer.byteLength(stdout),
+        });
+        resolve(stdout);
+      }
+    });
+
+    child.on("error", (err) => {
+      updateProcess(outputDir, pid, {
+        status: "failed",
+        error: err.message,
+      });
+      reject(err);
+    });
   });
 }
 
@@ -34,7 +78,8 @@ async function runPhase(
   outputFile: string,
   prompt: string,
   model: string,
-  skipTo: number
+  skipTo: number,
+  outputDir: string
 ): Promise<void> {
   if (skipTo > num) {
     console.log(`⏭  Skipping phase ${num} (${name})`);
@@ -46,13 +91,13 @@ async function runPhase(
   console.log(`  → output: ${outputFile}`);
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
-  const result = await runClaude(prompt, model);
+  const result = await runClaude(prompt, model, outputDir, num, name, outputFile);
   await writeFile(outputFile, result, "utf-8");
 
   console.log(`  ✓ Done — ${Buffer.byteLength(result)} bytes written\n`);
 }
 
-function summarizeBranches(repo: DerivedRepo): string {
+export function summarizeBranches(repo: DerivedRepo): string {
   const lines: string[] = [];
   for (const b of repo.branches) {
     const prInfo = b.hasPr
@@ -75,7 +120,7 @@ function summarizeBranches(repo: DerivedRepo): string {
   return lines.join("\n\n");
 }
 
-function summarizeTimeline(data: DerivedData): string {
+export function summarizeTimeline(data: DerivedData): string {
   const lines: string[] = [];
   for (const day of data.days) {
     const commits = day.entries.filter((e) => e.type === "commit");
@@ -144,7 +189,8 @@ Output a structured markdown document with:
 
 Be concise. This is a scaffolding document that later analysis will flesh out.`,
     model,
-    skipTo
+    skipTo,
+    opts.outputDir
   );
 
   // ── Phase 2: Branch Topology (per repo) ─────────────────────────
@@ -193,7 +239,8 @@ List branches chronologically by first commit date, showing overlapping work.
 
 Output as markdown.`,
       model,
-      skipTo
+      skipTo,
+      opts.outputDir
     );
   }
 
@@ -247,7 +294,8 @@ branches, not a sequence of commits.
 
 Output as markdown.`,
       model,
-      skipTo
+      skipTo,
+      opts.outputDir
     );
   }
 
@@ -287,7 +335,8 @@ Rules:
 
 Output as a complete markdown document.`,
     model,
-    skipTo
+    skipTo,
+    opts.outputDir
   );
 
   // ── Phase 7: Fact-Check Pass ────────────────────────────────────
@@ -320,7 +369,8 @@ Produce a SHORT review document:
 
 Be terse. This is a checklist, not a rewrite.`,
     model,
-    skipTo
+    skipTo,
+    opts.outputDir
   );
 
   // ── Done ────────────────────────────────────────────────────────

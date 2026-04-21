@@ -4,8 +4,23 @@ import { parseArgs } from "node:util";
 import { LogOutputSchema } from "./types.js";
 import { deriveFromLog } from "./derive.js";
 import { runHarness } from "./harness.js";
+import { showStatus } from "./status.js";
+
+const subcommand = process.argv[2];
+
+if (subcommand === "status") {
+  const { values } = parseArgs({
+    args: process.argv.slice(3),
+    options: {
+      output: { type: "string", short: "o", default: "./archaeology-out" },
+    },
+  });
+  await showStatus(values.output!);
+  process.exit(0);
+}
 
 const { values, positionals } = parseArgs({
+  args: process.argv.slice(2),
   allowPositionals: true,
   options: {
     output: { type: "string", short: "o", default: "./archaeology-out" },
@@ -19,7 +34,16 @@ const { values, positionals } = parseArgs({
 const logPath = positionals[0];
 if (!logPath) {
   console.error(
-    `Usage: tsx src/cli.ts <log.json> [--output dir] [--model name] [--skip-to N] [--repo owner/repo] [--derive-only]`
+    `Usage:
+  tsx src/cli.ts <log.json> [options]    Run the archaeology pipeline
+  tsx src/cli.ts status [-o dir]         Check running processes
+
+Options:
+  -o, --output <dir>     Output directory (default: ./archaeology-out)
+  -m, --model <name>     Claude model to use
+  --skip-to <N>          Resume from phase N
+  -r, --repo <name>      Filter to a single repo
+  --derive-only          Just derive data, don't run Claude pipeline`
   );
   process.exit(1);
 }
