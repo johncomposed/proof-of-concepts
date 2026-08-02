@@ -1,6 +1,6 @@
 'use strict';
 const {
-  app, Tray, clipboard, nativeImage, shell, Notification,
+  app, Tray, Menu, clipboard, nativeImage, shell, Notification,
   BrowserWindow, ipcMain, dialog, screen,
 } = require('electron');
 const path = require('path');
@@ -19,6 +19,51 @@ const TABBY_CANDIDATES = [
   'C:\\Program Files\\Tabby\\Tabby.exe',
 ];
 const firstExisting = (list) => list.find((p) => p && fs.existsSync(p)) || null;
+
+// --- diagnostics ------------------------------------------------------------
+// Appends to zjc-tray.log next to the app so exits/crashes are attributable.
+const LOG_FILE = path.join(__dirname, 'zjc-tray.log');
+function logLine(...parts) {
+  try {
+    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${parts.join(' ')}\n`);
+  } catch { /* logging must never break the app */ }
+}
+process.on('uncaughtException', (err) => logLine('uncaughtException:', err.stack || err));
+process.on('unhandledRejection', (err) => logLine('unhandledRejection:', (err && err.stack) || err));
+app.on('render-process-gone', (_e, _wc, details) => logLine('render-process-gone:', JSON.stringify(details)));
+app.on('child-process-gone', (_e, details) => logLine('child-process-gone:', JSON.stringify(details)));
+app.on('before-quit', () => logLine('before-quit (app is exiting)'));
+app.on('second-instance', () => logLine('second-instance launch attempt (ignored)'));
+
+// --- settings ---------------------------------------------------------------
+const SETTINGS_FILE = path.join(__dirname, 'settings.json');
+let settings = { keepWslAlive: false };
+try { settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) }; } catch { /* first run */ }
+function saveSettings() {
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); }
+  catch (err) { logLine('saveSettings failed:', err.message); }
+}
+
+// Keep the WSL VM from idling out when no terminals are open: dbus-launch
+// leaves a detached dbus-daemon running inside WSL. Deliberately no -d flag --
+// this targets whatever the default distro is. Only launch if one of ours
+// isn't already running, so toggling/restarts don't pile up daemons.
+function assertKeepAlive() {
+  execFile('wsl.exe', ['--', 'bash', '-c',
+    'pgrep -f -- "--fork --print-pid" >/dev/null || exec dbus-launch true'],
+  { windowsHide: true }, (err) => { if (err) logLine('keep-alive start failed:', err.message); });
+}
+// Kill only dbus-launch-spawned daemons (--fork --print-pid is their argv
+// signature); a systemd-managed session/system dbus must survive this.
+function stopKeepAlive() {
+  execFile('wsl.exe', ['--', 'bash', '-c', 'pkill -f -- "--fork --print-pid"'],
+    { windowsHide: true }, () => {});
+}
+function setKeepAlive(enabled) {
+  settings.keepWslAlive = enabled;
+  saveSettings();
+  if (enabled) assertKeepAlive(); else stopKeepAlive();
+}
 
 let tray = null;
 let newWin = null;
@@ -131,7 +176,20 @@ function createMenuWin() {
     },
   });
   menuWin.loadFile('menu.html');
-  menuWin.on('blur', () => { lastHide = Date.now(); menuWin.hide(); });
+  menuWin.on('blur', () => { lastHide = Date.now(); if (!menuWin.isDestroyed()) menuWin.hide(); });
+  menuWin.on('closed', () => { logLine('menuWin closed'); menuWin = null; });
+  menuWin.webContents.on('render-process-gone', (_e, details) => {
+    logLine('menu renderer gone:', JSON.stringify(details), '- recreating');
+    if (menuWin && !menuWin.isDestroyed()) menuWin.destroy();
+    menuWin = null;
+  });
+  menuWin.webContents.on('console-message', (_e, level, message) => {
+    if (level >= 3) logLine('menu renderer console error:', message);
+  });
+}
+
+function ensureMenuWin() {
+  if (!menuWin || menuWin.isDestroyed()) createMenuWin();
 }
 
 function viewModel() {
@@ -180,7 +238,7 @@ function positionMenu() {
 }
 
 function toggleMenu() {
-  if (!menuWin) return;
+  ensureMenuWin();
   if (menuWin.isVisible()) { menuWin.hide(); return; }
   // clicking the tray icon blurs (hides) an open menu just before this fires
   if (Date.now() - lastHide < 300) return;
@@ -190,6 +248,27 @@ function toggleMenu() {
   menuWin.focus();
 }
 
+// Right-click: small native options menu (left-click keeps the sessions popup)
+function showOptionsMenu() {
+  const menu = Menu.buildFromTemplate([
+    {
+      label: 'Start at login',
+      type: 'checkbox',
+      checked: app.getLoginItemSettings().openAtLogin,
+      click: (mi) => app.setLoginItemSettings({ openAtLogin: mi.checked }),
+    },
+    {
+      label: 'Keep WSL alive',
+      type: 'checkbox',
+      checked: settings.keepWslAlive,
+      click: (mi) => setKeepAlive(mi.checked),
+    },
+    { type: 'separator' },
+    { label: 'Quit', click: () => { logLine('quit from options menu'); app.quit(); } },
+  ]);
+  tray.popUpContextMenu(menu);
+}
+
 ipcMain.on('menu-height', (_ev, h) => {
   const nh = Math.max(80, Math.min(Math.round(h), 700));
   if (nh === menuHeight) return;
@@ -197,18 +276,20 @@ ipcMain.on('menu-height', (_ev, h) => {
   if (menuWin && menuWin.isVisible()) positionMenu();
 });
 
+const hideMenu = () => { if (menuWin && !menuWin.isDestroyed()) menuWin.hide(); };
+
 ipcMain.handle('menu-action', async (_ev, a) => {
   switch (a.type) {
     case 'copy-url': clipboard.writeText(a.url); notify('Copied remote URL', a.url); break;
     case 'chrome': openChrome(a.url); break;
     case 'vscode': openVSCode(a.cwd); break;
     case 'tabby': openTabby(a.name); break;
-    case 'kill': menuWin.hide(); await killSession(a.name); break;
-    case 'new': menuWin.hide(); openNewSessionWindow(); break;
+    case 'kill': hideMenu(); await killSession(a.name); break;
+    case 'new': hideMenu(); openNewSessionWindow(); break;
     case 'refresh': poll(); break;
     case 'login': app.setLoginItemSettings({ openAtLogin: !!a.enabled }); render(); break;
-    case 'quit': app.quit(); break;
-    case 'hide': menuWin.hide(); break;
+    case 'quit': logLine('quit clicked in menu'); app.quit(); break;
+    case 'hide': hideMenu(); break;
   }
 });
 
@@ -292,12 +373,14 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.whenReady().then(async () => {
+    logLine(`started pid=${process.pid}`);
     app.setAppUserModelId('zjc.tray');
     try { distro = (await distroName()) || distro; } catch { /* keep default */ }
     tray = new Tray(trayIcon());
     createMenuWin();
     tray.on('click', toggleMenu);
-    tray.on('right-click', toggleMenu);
+    tray.on('right-click', showOptionsMenu);
+    if (settings.keepWslAlive) assertKeepAlive();
     render();
     poll();
     setInterval(poll, POLL_MS);
