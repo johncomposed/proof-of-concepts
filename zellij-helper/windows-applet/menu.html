@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #1b1b1b; color: #d6d6d6;
+    font: 13px/1.35 "Segoe UI", system-ui, sans-serif;
+    user-select: none; overflow: hidden;
+  }
+  #list { padding: 5px; }
+  .note { padding: 8px 10px; color: #8f8f8f; font-size: 12px; }
+  .note.err { color: #ff7b72; white-space: pre-wrap; }
+
+  .sess { padding: 6px 8px; border-radius: 3px; }
+  /* .sess:hover { background: #242424; } */
+  .line1 { display: flex; align-items: baseline; gap: 6px; }
+  .name {
+    font-weight: 600; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .stats { color: #8f8f8f; font-size: 11px; white-space: nowrap; }
+  .line2 {
+    color: #8f8f8f; font-size: 11px; margin-top: 1px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .actions { display: flex; gap: 4px; margin-top: 5px; flex-wrap: wrap; }
+  button {
+    padding: 2px 9px; font-size: 11px; border-radius: 2px;
+    border: 1px solid #333333; background: #252525; color: #cccccc; cursor: pointer;
+  }
+  button:hover { background: #2e2e2e; }
+  button.danger:hover { background: #5c2626; border-color: #7a2e2e; color: #ffb3ad; }
+  hr { border: none; border-top: 1px solid #2c2c2c; margin: 4px 10px; }
+  .footer { display: flex; gap: 4px; align-items: center; padding: 3px 8px 8px; }
+  .login { margin-left: auto; display: flex; gap: 5px; align-items: center;
+           font-size: 11px; color: #8f8f8f; cursor: pointer; }
+  .login input { accent-color: #3ddc84; margin: 0; }
+  .spacer { flex: 1; }
+</style>
+</head>
+<body>
+  <div id="list"></div>
+  <hr>
+  <div class="footer">
+    <button id="refresh">Refresh</button>
+    <button id="quit">Quit</button>
+    <span class="spacer"></span>
+    <button id="new">New session</button>
+    <!-- <label class="login"><input type="checkbox" id="login">start at login</label> -->
+  </div>
+
+<script>
+  const api = window.menuApi;
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  };
+  const btn = (label, cls, onclick) => {
+    const b = el('button', cls, label);
+    b.addEventListener('click', onclick);
+    return b;
+  };
+
+  function render(s) {
+    const list = document.getElementById('list');
+    list.innerHTML = '';
+
+    if (s.error) list.appendChild(el('div', 'note err', 'zjc error: ' + s.error));
+    else if (!s.sessions.length) list.appendChild(el('div', 'note', 'No zellij sessions'));
+
+    for (const x of s.sessions) {
+      const row = el('div', 'sess');
+      const l1 = el('div', 'line1');
+      l1.appendChild(el('span', 'name', x.name));
+      l1.appendChild(el('span', 'stats', x.live ? `${x.cpu} · ${x.mem}` : 'exited'));
+      row.appendChild(l1);
+      row.appendChild(el('div', 'line2', x.live ? `${x.cwdShort} · ${x.what}` : 'not running'));
+
+      const a = el('div', 'actions');
+      if (x.live) {
+        if (x.remote && x.url) {
+          a.appendChild(btn('Copy URL', '', () => api.action('copy-url', { url: x.url })));
+          a.appendChild(btn('Chrome', '', () => api.action('chrome', { url: x.url })));
+        } else if (x.remote) {
+          a.appendChild(el('span', 'stats', 'URL unknown '));
+        }
+        if (x.cwd) a.appendChild(btn('VS Code', '', () => api.action('vscode', { cwd: x.cwd })));
+        a.appendChild(btn('Tabby', '', () => api.action('tabby', { name: x.name })));
+        a.appendChild(el('span', 'spacer'));
+        a.appendChild(btn('Kill', 'danger', () => api.action('kill', { name: x.name })));
+      } else {
+        a.appendChild(btn('Resurrect in Tabby', '', () => api.action('tabby', { name: x.name })));
+        a.appendChild(btn('Delete', 'danger', () => api.action('kill', { name: x.name })));
+      }
+      row.appendChild(a);
+      list.appendChild(row);
+    }
+
+    const login = document.getElementById('login');
+    if (login) login.checked = !!s.loginEnabled;
+    requestAnimationFrame(() => api.reportHeight(document.body.scrollHeight));
+  }
+
+  api.onState(render);
+  document.getElementById('new').addEventListener('click', () => api.action('new'));
+  document.getElementById('refresh').addEventListener('click', () => api.action('refresh'));
+  document.getElementById('quit').addEventListener('click', () => api.action('quit'));
+  document.getElementById('login')?.addEventListener('change', (e) =>
+    api.action('login', { enabled: e.target.checked }));
+  window.addEventListener('keydown', (e) => { if (e.key === 'Escape') api.action('hide'); });
+</script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 'use strict';
 const {
-  app, Tray, Menu, clipboard, nativeImage, shell, Notification,
-  BrowserWindow, ipcMain, dialog,
+  app, Tray, clipboard, nativeImage, shell, Notification,
+  BrowserWindow, ipcMain, dialog, screen,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -84,13 +84,13 @@ function openVSCode(cwd) {
     (err) => { if (err) notify('VS Code failed', err.message); });
 }
 
+// Tabby's yargs CLI eats dash-flags and `--` (verified against its parser),
+// so the command must be entirely positional: no -d, no bash -lc. wsl.exe
+// runs its command line through bash -c, which expands the tilde.
 function openTabby(name) {
   const tabby = firstExisting(TABBY_CANDIDATES);
   if (!tabby) return notify('Tabby not found', 'Install Tabby or edit TABBY_CANDIDATES in main.js');
-  const attach =
-    `command -v zjc >/dev/null 2>&1 && exec zjc attach ${shq(name)}; ` +
-    `exec $HOME/Code/zjc attach ${shq(name)}`;
-  execFile(tabby, ['run', WSL, '-d', distro, '--', 'bash', '-lc', attach],
+  execFile(tabby, ['run', WSL, '~/Code/zjc', 'attach', name],
     { windowsHide: true },
     (err) => { if (err) notify('Tabby failed', err.message); });
 }
@@ -98,86 +98,119 @@ function openTabby(name) {
 async function killSession(name) {
   try {
     await zjc(`kill ${shq(name)}`);
-    notify('Session killed', name);
   } catch (err) {
     notify('Kill failed', String(err.stderr || err.message).trim());
   }
   poll();
 }
 
-// --- menu -------------------------------------------------------------------
+// --- popup menu (custom window: native menus can't drop the icon gutter) ----
 
-function topLabel(s) {
-  if (s.state !== 'live') return `${s.name}  (exited)`;
-  const bolt = s.claude && s.claude.remote ? '⚡ ' : '';
-  return `${bolt}${s.name}  —  ${shorten(s.cwd)}`;
+const MENU_W = 340;
+let menuWin = null;
+let menuHeight = 260;
+let lastHide = 0;
+
+function createMenuWin() {
+  menuWin = new BrowserWindow({
+    width: MENU_W,
+    height: menuHeight,
+    show: false,
+    frame: false,
+    backgroundColor: '#1b1b1b',
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'menu-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  menuWin.loadFile('menu.html');
+  menuWin.on('blur', () => { lastHide = Date.now(); menuWin.hide(); });
 }
 
-function sessionSubmenu(s) {
-  if (s.state !== 'live') {
-    return [
-      { label: 'exited — not running', enabled: false },
-      { type: 'separator' },
-      { label: 'Resurrect in Tabby', click: () => openTabby(s.name) },
-      { label: 'Delete session', click: () => killSession(s.name) },
-    ];
-  }
-  const items = [];
-  const c = s.claude;
-  const what = c ? (c.remote ? 'claude --remote-control' : 'claude (not remote)')
-    : (s.program && s.program !== '-' ? s.program : 'nothing running');
-  items.push({ label: shorten(s.cwd), enabled: false });
-  items.push({ label: `${what}  ·  CPU ${fmtCpu(s.name)}  ·  ${fmtMem(s.rss_kb || 0)}`, enabled: false });
-  items.push({ type: 'separator' });
-  if (c && c.remote) {
-    if (c.url) {
-      items.push({
-        label: 'Copy remote URL',
-        click: () => { clipboard.writeText(c.url); notify('Copied remote URL', c.url); },
-      });
-      items.push({ label: 'Open in Chrome', click: () => openChrome(c.url) });
-    } else {
-      items.push({ label: 'Remote URL unknown (banner scrolled off)', enabled: false });
-    }
-    items.push({ type: 'separator' });
-  }
-  items.push({ label: 'Open VS Code here', enabled: !!s.cwd, click: () => openVSCode(s.cwd) });
-  items.push({ label: 'Open in Tabby', click: () => openTabby(s.name) });
-  items.push({ type: 'separator' });
-  items.push({ label: 'Kill session', click: () => killSession(s.name) });
-  return items;
+function viewModel() {
+  return {
+    error: lastError,
+    loginEnabled: app.getLoginItemSettings().openAtLogin,
+    sessions: sessions.map((s) => {
+      const c = s.claude;
+      return {
+        name: s.name,
+        live: s.state === 'live',
+        remote: !!(c && c.remote),
+        url: c ? c.url : null,
+        cwd: s.cwd,
+        cwdShort: shorten(s.cwd),
+        what: c ? (c.remote ? 'claude --remote-control' : 'claude (not remote)')
+          : (s.program && s.program !== '-' ? s.program : 'nothing running'),
+        cpu: fmtCpu(s.name),
+        mem: fmtMem(s.rss_kb || 0),
+      };
+    }),
+  };
 }
 
 function render() {
-  if (!tray) return;
-  const live = sessions.filter((s) => s.state === 'live');
-  tray.setToolTip(`zjc — ${live.length} live session${live.length === 1 ? '' : 's'}`);
-
-  const tpl = [];
-  if (lastError) {
-    tpl.push({
-      label: 'zjc error (click for details)',
-      click: () => dialog.showErrorBox('zjc', lastError),
-    });
-  } else if (!sessions.length) {
-    tpl.push({ label: 'No zellij sessions', enabled: false });
+  if (tray) {
+    const live = sessions.filter((s) => s.state === 'live');
+    tray.setToolTip(`zjc — ${live.length} live session${live.length === 1 ? '' : 's'}`);
   }
-  for (const s of sessions) {
-    tpl.push({ label: topLabel(s), submenu: sessionSubmenu(s) });
-  }
-  tpl.push({ type: 'separator' });
-  tpl.push({ label: 'New session…', click: openNewSessionWindow });
-  tpl.push({ label: 'Refresh now', click: () => poll() });
-  tpl.push({ type: 'separator' });
-  tpl.push({
-    label: 'Start at login',
-    type: 'checkbox',
-    checked: app.getLoginItemSettings().openAtLogin,
-    click: (mi) => app.setLoginItemSettings({ openAtLogin: mi.checked }),
-  });
-  tpl.push({ label: 'Quit', click: () => app.quit() });
-  tray.setContextMenu(Menu.buildFromTemplate(tpl));
+  if (menuWin && !menuWin.isDestroyed()) menuWin.webContents.send('state', viewModel());
 }
+
+function positionMenu() {
+  // Anchor to the tray icon, not the cursor: this also runs on height changes
+  // while the menu is open, when the cursor is over the menu itself.
+  const tb = tray ? tray.getBounds() : null;
+  const anchor = tb && tb.width
+    ? { x: Math.round(tb.x + tb.width / 2), y: tb.y }
+    : screen.getCursorScreenPoint();
+  const wa = screen.getDisplayNearestPoint(anchor).workArea;
+  const h = Math.min(menuHeight, wa.height - 16);
+  let x = Math.round(anchor.x - MENU_W / 2);
+  x = Math.max(wa.x + 8, Math.min(x, wa.x + wa.width - MENU_W - 8));
+  const y = wa.y + wa.height - h - 8;
+  menuWin.setBounds({ x, y, width: MENU_W, height: h });
+}
+
+function toggleMenu() {
+  if (!menuWin) return;
+  if (menuWin.isVisible()) { menuWin.hide(); return; }
+  // clicking the tray icon blurs (hides) an open menu just before this fires
+  if (Date.now() - lastHide < 300) return;
+  render();
+  positionMenu();
+  menuWin.show();
+  menuWin.focus();
+}
+
+ipcMain.on('menu-height', (_ev, h) => {
+  const nh = Math.max(80, Math.min(Math.round(h), 700));
+  if (nh === menuHeight) return;
+  menuHeight = nh;
+  if (menuWin && menuWin.isVisible()) positionMenu();
+});
+
+ipcMain.handle('menu-action', async (_ev, a) => {
+  switch (a.type) {
+    case 'copy-url': clipboard.writeText(a.url); notify('Copied remote URL', a.url); break;
+    case 'chrome': openChrome(a.url); break;
+    case 'vscode': openVSCode(a.cwd); break;
+    case 'tabby': openTabby(a.name); break;
+    case 'kill': menuWin.hide(); await killSession(a.name); break;
+    case 'new': menuWin.hide(); openNewSessionWindow(); break;
+    case 'refresh': poll(); break;
+    case 'login': app.setLoginItemSettings({ openAtLogin: !!a.enabled }); render(); break;
+    case 'quit': app.quit(); break;
+    case 'hide': menuWin.hide(); break;
+  }
+});
 
 // --- new session window -----------------------------------------------------
 
@@ -225,7 +258,6 @@ ipcMain.handle('create-session', async (_ev, { name, dir }) => {
     poll();
     if (/^https:\/\//.test(url)) {
       clipboard.writeText(url);
-      notify('Session ready — URL copied', url);
       return { ok: true, url };
     }
     return { ok: true, url: null, message: out.trim() || 'created, but no URL appeared' };
@@ -263,7 +295,9 @@ if (!app.requestSingleInstanceLock()) {
     app.setAppUserModelId('zjc.tray');
     try { distro = (await distroName()) || distro; } catch { /* keep default */ }
     tray = new Tray(trayIcon());
-    tray.on('click', () => tray.popUpContextMenu());
+    createMenuWin();
+    tray.on('click', toggleMenu);
+    tray.on('right-click', toggleMenu);
     render();
     poll();
     setInterval(poll, POLL_MS);
