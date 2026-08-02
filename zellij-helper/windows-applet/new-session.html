@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>New zellij session</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 18px 22px;
+    background: #16181f; color: #d7dae0;
+    font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { font-size: 15px; margin: 0 0 14px; font-weight: 600; }
+  label { display: block; font-size: 12px; color: #8b90a0; margin: 10px 0 4px; }
+  input[type=text] {
+    width: 100%; padding: 7px 9px; border-radius: 6px;
+    border: 1px solid #2c303c; background: #0f1116; color: #e8eaf0;
+    font: 13px "Cascadia Mono", Consolas, monospace;
+  }
+  input[type=text]:focus { outline: none; border-color: #3ddc84; }
+  .dir-row { display: flex; gap: 8px; }
+  .dir-row input { flex: 1; }
+  button {
+    padding: 7px 14px; border-radius: 6px; border: 1px solid #2c303c;
+    background: #22262f; color: #d7dae0; cursor: pointer; font-size: 13px;
+  }
+  button:hover { background: #2a2f3a; }
+  button.primary { background: #1d7a4a; border-color: #1d7a4a; color: #fff; font-weight: 600; }
+  button.primary:hover { background: #219155; }
+  button:disabled { opacity: .5; cursor: default; }
+  .actions { margin-top: 16px; display: flex; gap: 8px; align-items: center; }
+  #status { margin-top: 14px; font-size: 13px; color: #8b90a0; min-height: 20px; white-space: pre-wrap; }
+  #status.err { color: #ff7b72; }
+  #result { margin-top: 10px; display: none; }
+  #url {
+    display: block; padding: 8px 10px; border-radius: 6px; background: #0f1116;
+    border: 1px solid #1d7a4a; color: #3ddc84;
+    font: 12px "Cascadia Mono", Consolas, monospace;
+    word-break: break-all; margin-bottom: 8px;
+  }
+  @keyframes pulse { 50% { opacity: .4; } }
+  .waiting { animation: pulse 1.2s ease-in-out infinite; }
+</style>
+</head>
+<body>
+  <h1>New zellij session</h1>
+
+  <label for="name">Name <span style="color:#555">(optional — auto-generated if blank)</span></label>
+  <input type="text" id="name" placeholder="cc-123456" spellcheck="false">
+
+  <label for="dir">Directory (WSL path)</label>
+  <div class="dir-row">
+    <input type="text" id="dir" value="~" spellcheck="false">
+    <button id="browse">Browse…</button>
+  </div>
+
+  <div class="actions">
+    <button id="create" class="primary">Create session</button>
+  </div>
+
+  <div id="status"></div>
+  <div id="result">
+    <span id="url"></span>
+    <button id="copy">Copy URL</button>
+    <button id="chrome">Open in Chrome</button>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let lastUrl = null;
+
+  $('browse').addEventListener('click', async () => {
+    const dir = await window.zjc.pickDir();
+    if (dir) $('dir').value = dir;
+  });
+
+  $('create').addEventListener('click', async () => {
+    const name = $('name').value.trim();
+    const dir = $('dir').value.trim();             // ~ is expanded on the main side
+
+    $('create').disabled = true;
+    $('result').style.display = 'none';
+    const st = $('status');
+    st.classList.remove('err');
+    st.classList.add('waiting');
+    st.textContent = 'Creating session and waiting for the Remote Control URL (up to 90s)…';
+
+    const res = await window.zjc.createSession({ name, dir });
+
+    st.classList.remove('waiting');
+    $('create').disabled = false;
+    if (res.ok && res.url) {
+      st.textContent = 'Session ready. URL copied to clipboard.';
+      lastUrl = res.url;
+      $('url').textContent = res.url;
+      $('result').style.display = 'block';
+    } else if (res.ok) {
+      st.textContent = res.message || 'Created, but no URL appeared.';
+    } else {
+      st.classList.add('err');
+      st.textContent = res.message || 'Failed.';
+    }
+  });
+
+  $('copy').addEventListener('click', () => navigator.clipboard.writeText(lastUrl || ''));
+  $('chrome').addEventListener('click', () => { if (lastUrl) window.zjc.openUrl(lastUrl); });
+</script>
+</body>
+</html>

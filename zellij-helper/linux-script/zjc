@@ -8,6 +8,7 @@
 #                           printing the claude.ai/code URL
 #   zjc url <name>          print the remote URL for a session
 #   zjc kill <name>         kill and delete a session
+#   zjc json                machine-readable session list (cwd, claude, cpu, mem)
 #
 # Why the URL handling looks the way it does: Claude Code does NOT persist the
 # Remote Control URL anywhere on disk, and sessions started this way don't show
@@ -165,13 +166,22 @@ cwd_of_session() {
 }
 
 # --- remote URL -------------------------------------------------------------
+# --full: the banner scrolls out of the viewport almost immediately, but stays
+# in scrollback. Without a pane id, dump-screen targets the "focused" pane,
+# which a detached session doesn't have -- so probe the low pane ids too.
 scrape_url() {  # <session> [pane-id]
-  local sess=$1 pane=${2:-}
+  local sess=$1 pane=${2:-} out p
   if [[ -n $pane ]]; then
-    zj -s "$sess" action dump-screen -p "$pane" 2>/dev/null
+    out=$(zj -s "$sess" action dump-screen --full -p "$pane" 2>/dev/null)
   else
-    zj -s "$sess" action dump-screen 2>/dev/null
-  fi | tr -d ' \n' | grep -oE "$URL_ANCHORED" | sed 's/^orat//' | tail -1
+    out=$(zj -s "$sess" action dump-screen --full 2>/dev/null)
+    if [[ -z $out ]]; then
+      for p in terminal_1 terminal_2 terminal_3 terminal_4; do
+        out+=$(zj -s "$sess" action dump-screen --full -p "$p" 2>/dev/null)
+      done
+    fi
+  fi
+  printf '%s' "$out" | tr -d ' \n' | grep -oE "$URL_ANCHORED" | sed 's/^orat//' | tail -1
 }
 
 save_url() {  # <session> <pid> <url>
@@ -311,6 +321,13 @@ cmd_new() {
     sleep 2; waited=$((waited + 2))
     url=$(scrape_url "$name" "$pane")
     [[ -n $url ]] && break
+    # First visit to a folder blocks on Claude's trust prompt. The user chose
+    # this directory explicitly, so answer "Yes, I trust this folder" (Enter).
+    if zj -s "$name" action dump-screen -p "$pane" 2>/dev/null \
+         | tr -d ' \n' | grep -q 'Isthisaprojectyoucreated'; then
+      printf 'accepting the folder-trust prompt ...\n' >&2
+      zj -s "$name" action write -p "$pane" 13 2>/dev/null
+    fi
   done
 
   if [[ -z $url ]]; then
@@ -335,7 +352,72 @@ cmd_kill() {
   printf 'killed %s\n' "$name"
 }
 
-usage() { sed -n '2,19p' "$0" | sed 's/^# \?//'; }
+# --- json (for tooling, e.g. the Windows tray applet) -----------------------
+json_str() {
+  local s=${1//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+# comm can itself contain ')', so strip through the LAST ')' before counting
+# fields: utime+stime land at 12+13 and rss (pages) at 22 of what remains.
+proc_stat() {  # <pid> -> "cpu_ticks rss_pages"
+  local s
+  s=$({ cat "/proc/$1/stat"; } 2>/dev/null)
+  [[ -n $s ]] || return 1
+  s=${s##*) }
+  awk '{print $12+$13, $22}' <<<"$s"
+}
+
+session_metrics() {  # <session> -> "cpu_ticks rss_kb", summed over the session's pids
+  local sess=$1 pid t r ticks=0 pages=0
+  local pagekb=$(( $(getconf PAGESIZE 2>/dev/null || echo 4096) / 1024 ))
+  for pid in $({ server_pid_of_session "$sess"; pids_in_session "$sess"; } | sort -un); do
+    read -r t r < <(proc_stat "$pid") || continue
+    ticks=$((ticks + t)); pages=$((pages + r))
+  done
+  printf '%s %s\n' "$ticks" $((pages * pagekb))
+}
+
+# cpu_ticks is cumulative; consumers compute a percentage from the delta
+# between two calls: (dticks / clk_tck) / dseconds * 100.
+cmd_json() {
+  local name state cwd prog pid url ticks rss sep=''
+  printf '{"clk_tck":%s,"home":"%s","current":"%s","sessions":[' \
+    "$(getconf CLK_TCK 2>/dev/null || echo 100)" \
+    "$(json_str "$HOME")" "$(json_str "${ZELLIJ_SESSION_NAME:-}")"
+  while IFS=$'\t' read -r name state; do
+    printf '%s{"name":"%s","state":"%s"' "$sep" "$(json_str "$name")" "$state"
+    sep=','
+    if [[ $state != live ]]; then
+      printf ',"cwd":null,"program":null,"claude":null,"cpu_ticks":null,"rss_kb":null}'
+      continue
+    fi
+    prog=$(program_in_session "$name")
+    cwd=$(cwd_of_session "$name") || cwd=''
+    read -r ticks rss < <(session_metrics "$name")
+    if [[ -n $cwd ]]; then printf ',"cwd":"%s"' "$(json_str "$cwd")"; else printf ',"cwd":null'; fi
+    printf ',"program":"%s"' "$(json_str "$prog")"
+    if pid=$(claude_pid_in_session "$name"); then
+      if is_remote_claude "$pid"; then
+        if url=$(url_for_session "$name" "$pid"); then
+          printf ',"claude":{"pid":%s,"remote":true,"url":"%s"}' "$pid" "$(json_str "$url")"
+        else
+          printf ',"claude":{"pid":%s,"remote":true,"url":null}' "$pid"
+        fi
+      else
+        printf ',"claude":{"pid":%s,"remote":false,"url":null}' "$pid"
+      fi
+    else
+      printf ',"claude":null'
+    fi
+    printf ',"cpu_ticks":%s,"rss_kb":%s}' "$ticks" "$rss"
+  done < <(session_rows)
+  printf ']}\n'
+}
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \?//'; }
 
 case ${1:-list} in
   ls|list)        shift || true; cmd_list ;;
@@ -344,6 +426,7 @@ case ${1:-list} in
   new|n)          shift; cmd_new "$@" ;;
   url)            shift; cmd_url "$@" ;;
   kill|k)         shift; cmd_kill "$@" ;;
+  json)           shift || true; cmd_json ;;
   -h|--help|help) usage ;;
   *)              die "unknown command: $1 (try: zjc --help)" ;;
 esac
