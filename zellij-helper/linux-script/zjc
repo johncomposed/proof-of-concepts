@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+# zjc -- zellij + claude session helper
+#
+#   zjc                     list sessions: cwd, running program, claude remote URL
+#   zjc current             print the session you're in right now
+#   zjc attach <name>       drop into a session
+#   zjc new [name] [-d dir] new detached session running `claude --remote-control`,
+#                           printing the claude.ai/code URL
+#   zjc url <name>          print the remote URL for a session
+#   zjc kill <name>         kill and delete a session
+#
+# Why the URL handling looks the way it does: Claude Code does NOT persist the
+# Remote Control URL anywhere on disk, and sessions started this way don't show
+# up in `claude agents --json`. The only copy lives in the running process and
+# on the pane itself. So `zjc new` scrapes it from the pane at startup -- when
+# the banner is guaranteed to be on screen -- and records it under $STATE_DIR.
+# For sessions zjc didn't create, it falls back to scraping, which only works
+# while the banner is still in the viewport. Anything else reports "unknown"
+# rather than guessing.
+
+set -uo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/zjc"
+
+# Claude prints: "... Continue here, on your phone, or at <URL>". We strip all
+# whitespace from the dump first (the pane hard-wraps the URL across lines), so
+# the anchor is whitespace-free too. The anchor matters: without it we'd match
+# any claude.ai URL that ever appeared as text in the pane, including ones a
+# session merely printed while chatting.
+URL_RE='https://claude\.ai/code/session_[A-Za-z0-9_-]+'
+URL_ANCHORED="orat${URL_RE}"
+
+die() { printf 'zjc: %s\n' "$*" >&2; exit 1; }
+
+# --- binaries ---------------------------------------------------------------
+# zellij isn't necessarily on PATH: on this box it's a bootstrap build under
+# /tmp, so also ask any running server where it lives.
+find_zellij() {
+  local p pid
+  if [[ -n ${ZJC_ZELLIJ:-} ]]; then
+    [[ -x $ZJC_ZELLIJ ]] || die "ZJC_ZELLIJ=$ZJC_ZELLIJ is not executable"
+    printf '%s\n' "$ZJC_ZELLIJ"; return 0
+  fi
+  if p=$(command -v zellij 2>/dev/null); then printf '%s\n' "$p"; return 0; fi
+  while read -r pid; do
+    [[ -n $pid ]] || continue
+    p=$(readlink -f "/proc/$pid/exe" 2>/dev/null) || continue
+    [[ -x $p ]] && { printf '%s\n' "$p"; return 0; }
+  done < <(pgrep -f 'zellij .*--server' 2>/dev/null)
+  for p in /tmp/zellij/bootstrap/zellij "$HOME/.local/bin/zellij" \
+           "$HOME/.cargo/bin/zellij" /usr/local/bin/zellij /usr/bin/zellij; do
+    [[ -x $p ]] && { printf '%s\n' "$p"; return 0; }
+  done
+  return 1
+}
+
+find_claude() {
+  local p
+  if [[ -n ${ZJC_CLAUDE:-} ]]; then
+    [[ -x $ZJC_CLAUDE ]] || die "ZJC_CLAUDE=$ZJC_CLAUDE is not executable"
+    printf '%s\n' "$ZJC_CLAUDE"; return 0
+  fi
+  if p=$(command -v claude 2>/dev/null); then printf '%s\n' "$p"; return 0; fi
+  [[ -x $HOME/.local/bin/claude ]] && { printf '%s\n' "$HOME/.local/bin/claude"; return 0; }
+  return 1
+}
+
+ZJ=$(find_zellij) || die "can't find the zellij binary (set ZJC_ZELLIJ=/path/to/zellij)"
+
+zj() { "$ZJ" "$@"; }
+
+# --- process inspection -----------------------------------------------------
+# Everything below reads /proc rather than any claude-side registry, because
+# panes inherit ZELLIJ_SESSION_NAME -- an exact pid -> session mapping.
+
+# The redirect itself fails on root-owned pids, and bash reports that before the
+# command ever runs -- so the suppression has to wrap the redirect, not the tool.
+ppid_of() { { awk '{print $4}' "/proc/$1/stat"; } 2>/dev/null; }
+
+sess_of_pid() {
+  { tr '\0' '\n' < "/proc/$1/environ"; } 2>/dev/null \
+    | sed -n 's/^ZELLIJ_SESSION_NAME=//p' | head -1
+}
+
+cmdline_of() { { tr '\0' ' ' < "/proc/$1/cmdline"; } 2>/dev/null; }
+
+argv0_of() { { tr '\0' '\n' < "/proc/$1/cmdline"; } 2>/dev/null | head -1; }
+
+# pids belonging to a session, excluding the zellij server process itself
+pids_in_session() {
+  local want=$1 pid cmd
+  for pid in /proc/[0-9]*; do
+    pid=${pid#/proc/}
+    [[ $(sess_of_pid "$pid") == "$want" ]] || continue
+    cmd=$(cmdline_of "$pid")
+    [[ -n $cmd ]] || continue
+    [[ $cmd == *zellij*--server* ]] && continue
+    printf '%s\n' "$pid"
+  done
+}
+
+server_pid_of_session() {
+  local want=$1 pid cmd
+  for pid in /proc/[0-9]*; do
+    pid=${pid#/proc/}
+    cmd=$(cmdline_of "$pid")
+    [[ $cmd == *zellij*--server* ]] || continue
+    [[ $(sess_of_pid "$pid") == "$want" ]] || continue
+    printf '%s\n' "$pid"; return 0
+  done
+  return 1
+}
+
+# The claude process for a session, if any. Matches the executable name so a
+# shell that merely mentions "claude" in its argv doesn't count.
+claude_pid_in_session() {
+  local pid argv0
+  while read -r pid; do
+    [[ -n $pid ]] || continue
+    argv0=$(argv0_of "$pid")
+    [[ ${argv0##*/} == claude ]] && { printf '%s\n' "$pid"; return 0; }
+  done < <(pids_in_session "$1")
+  return 1
+}
+
+is_remote_claude() {
+  local cmd; cmd=$(cmdline_of "$1")
+  [[ $cmd == *--remote-control* || $cmd == *" --rc"* ]]
+}
+
+# What's actually running in a session. Prefers claude; otherwise reports the
+# pane root processes (direct children of the zellij server), which skips the
+# transient helpers a claude session spawns for its own Bash tool.
+program_in_session() {
+  local sess=$1 pid spid out=() argv0
+  if pid=$(claude_pid_in_session "$sess"); then
+    printf 'claude\n'; return 0
+  fi
+  spid=$(server_pid_of_session "$sess") || { printf '-\n'; return 0; }
+  while read -r pid; do
+    [[ -n $pid ]] || continue
+    [[ $(ppid_of "$pid") == "$spid" ]] || continue
+    argv0=$(argv0_of "$pid")
+    out+=("${argv0##*/}")
+  done < <(pids_in_session "$sess")
+  if ((${#out[@]})); then
+    printf '%s\n' "$(printf '%s,' "${out[@]}" | sed 's/,$//')"
+  else
+    printf '-\n'
+  fi
+}
+
+cwd_of_session() {
+  local sess=$1 pid spid
+  if pid=$(claude_pid_in_session "$sess"); then
+    readlink "/proc/$pid/cwd" 2>/dev/null && return 0
+  fi
+  spid=$(server_pid_of_session "$sess") || return 1
+  while read -r pid; do
+    [[ -n $pid ]] || continue
+    [[ $(ppid_of "$pid") == "$spid" ]] || continue
+    readlink "/proc/$pid/cwd" 2>/dev/null && return 0
+  done < <(pids_in_session "$sess")
+  return 1
+}
+
+# --- remote URL -------------------------------------------------------------
+scrape_url() {  # <session> [pane-id]
+  local sess=$1 pane=${2:-}
+  if [[ -n $pane ]]; then
+    zj -s "$sess" action dump-screen -p "$pane" 2>/dev/null
+  else
+    zj -s "$sess" action dump-screen 2>/dev/null
+  fi | tr -d ' \n' | grep -oE "$URL_ANCHORED" | sed 's/^orat//' | tail -1
+}
+
+save_url() {  # <session> <pid> <url>
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  printf '%s\t%s\n' "$2" "$3" > "$STATE_DIR/$1.url"
+}
+
+# Recorded URL, but only if it still belongs to the claude process running now
+# -- otherwise it's a leftover from a previous session of the same name.
+load_url() {  # <session> <current-claude-pid>
+  local f="$STATE_DIR/$1.url" pid url
+  [[ -r $f ]] || return 1
+  IFS=$'\t' read -r pid url < "$f" || return 1
+  [[ $pid == "$2" && -n $url ]] || return 1
+  printf '%s\n' "$url"
+}
+
+url_for_session() {  # <session> <claude-pid>
+  local url
+  url=$(load_url "$1" "$2") && { printf '%s\n' "$url"; return 0; }
+  url=$(scrape_url "$1") && [[ -n $url ]] && {
+    save_url "$1" "$2" "$url"
+    printf '%s\n' "$url"; return 0
+  }
+  return 1
+}
+
+# --- sessions ---------------------------------------------------------------
+# name<TAB>live|exited
+session_rows() {
+  zj list-sessions --no-formatting 2>/dev/null | while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    local name=${line%% *} state=live
+    [[ $line == *EXITED* ]] && state=exited
+    printf '%s\t%s\n' "$name" "$state"
+  done
+}
+
+session_exists() {
+  local n
+  while IFS=$'\t' read -r n _; do [[ $n == "$1" ]] && return 0; done < <(session_rows)
+  return 1
+}
+
+shorten() { [[ $1 == "$HOME"* ]] && printf '~%s\n' "${1#"$HOME"}" || printf '%s\n' "$1"; }
+
+# --- commands ---------------------------------------------------------------
+cmd_list() {
+  local name state cur pid prog cwd url mark
+  cur=${ZELLIJ_SESSION_NAME:-}
+  printf '%-3s %-22s %-9s %-26s %-14s %s\n' '' SESSION STATE CWD PROGRAM 'REMOTE URL'
+  while IFS=$'\t' read -r name state; do
+    mark='   '; [[ $name == "$cur" ]] && mark=' * '
+    if [[ $state == exited ]]; then
+      printf '%-3s %-22s %-9s %-26s %-14s %s\n' "$mark" "$name" "$state" '-' '-' '-'
+      continue
+    fi
+    prog=$(program_in_session "$name")
+    cwd=$(cwd_of_session "$name") && cwd=$(shorten "$cwd") || cwd='-'
+    url='-'
+    if [[ $prog == claude ]]; then
+      pid=$(claude_pid_in_session "$name")
+      if is_remote_claude "$pid"; then
+        url=$(url_for_session "$name" "$pid") || url='unknown (banner scrolled off)'
+      else
+        url='not remote'
+      fi
+    fi
+    printf '%-3s %-22s %-9s %-26s %-14s %s\n' "$mark" "$name" "$state" "$cwd" "$prog" "$url"
+  done < <(session_rows)
+  [[ -n $cur ]] && printf '\n* = the session you are in\n'
+}
+
+cmd_current() {
+  if [[ -n ${ZELLIJ_SESSION_NAME:-} ]]; then
+    printf '%s\n' "$ZELLIJ_SESSION_NAME"
+  else
+    printf 'not inside a zellij session\n' >&2; return 1
+  fi
+}
+
+cmd_attach() {
+  local name=${1:-}
+  [[ -n $name ]] || die "usage: zjc attach <session>"
+  session_exists "$name" || die "no such session: $name"
+  if [[ -n ${ZELLIJ:-} ]]; then
+    die "already inside '${ZELLIJ_SESSION_NAME:-?}' -- zellij can't nest. Detach first (Ctrl-o d), then: zjc attach $name"
+  fi
+  exec "$ZJ" attach "$name"
+}
+
+cmd_url() {
+  local name=${1:-} pid url
+  [[ -n $name ]] || die "usage: zjc url <session>"
+  session_exists "$name" || die "no such session: $name"
+  pid=$(claude_pid_in_session "$name") || die "no claude process in '$name'"
+  is_remote_claude "$pid" || die "claude in '$name' is not running with --remote-control"
+  url=$(url_for_session "$name" "$pid") \
+    || die "URL unavailable: not recorded by zjc, and the banner has scrolled out of '$name'"
+  printf '%s\n' "$url"
+}
+
+cmd_new() {
+  local name='' dir=$PWD wait=90
+  while (($#)); do
+    case $1 in
+      -d|--dir)  dir=${2:-}; shift 2 || die "-d needs a directory" ;;
+      -w|--wait) wait=${2:-}; shift 2 || die "-w needs seconds" ;;
+      -*)        die "unknown option: $1" ;;
+      *)         name=$1; shift ;;
+    esac
+  done
+  [[ -n $name ]] || name="cc-$(date +%H%M%S)"
+  [[ -d $dir ]] || die "not a directory: $dir"
+  dir=$(cd "$dir" && pwd -P)
+  session_exists "$name" && die "session '$name' already exists"
+
+  local claude_bin; claude_bin=$(find_claude) \
+    || die "can't find the claude binary (set ZJC_CLAUDE=/path/to/claude)"
+
+  printf 'creating detached session %s in %s ...\n' "$name" "$(shorten "$dir")" >&2
+  zj attach --create-background "$name" >/dev/null 2>&1
+
+  # wait for the session's server to come up before talking to it
+  local i
+  for ((i=0; i<50; i++)); do session_exists "$name" && break; sleep 0.2; done
+  session_exists "$name" || die "session '$name' did not come up"
+  sleep 1
+
+  local pane
+  pane=$(zj -s "$name" run --cwd "$dir" -- "$claude_bin" --remote-control "$name" 2>&1 | tr -d '[:space:]')
+  [[ $pane == terminal_* ]] || die "failed to start claude in '$name': $pane"
+
+  printf 'waiting for Remote Control (up to %ss) ...\n' "$wait" >&2
+  local url='' waited=0
+  while ((waited < wait)); do
+    sleep 2; waited=$((waited + 2))
+    url=$(scrape_url "$name" "$pane")
+    [[ -n $url ]] && break
+  done
+
+  if [[ -z $url ]]; then
+    printf "zjc: claude started in '%s' (pane %s) but no Remote Control URL appeared within %ss.\n" \
+           "$name" "$pane" "$wait" >&2
+    printf "     Attach and check for a prompt: zjc attach %s\n" "$name" >&2
+    return 1
+  fi
+
+  local pid; pid=$(claude_pid_in_session "$name") && save_url "$name" "$pid" "$url"
+  printf '%s\n' "$url"
+}
+
+cmd_kill() {
+  local name=${1:-}
+  [[ -n $name ]] || die "usage: zjc kill <session>"
+  [[ $name == "${ZELLIJ_SESSION_NAME:-}" ]] && die "refusing to kill the session you're in ($name)"
+  session_exists "$name" || die "no such session: $name"
+  zj kill-session "$name"  >/dev/null 2>&1
+  zj delete-session "$name" >/dev/null 2>&1
+  rm -f "$STATE_DIR/$name.url"
+  printf 'killed %s\n' "$name"
+}
+
+usage() { sed -n '2,19p' "$0" | sed 's/^# \?//'; }
+
+case ${1:-list} in
+  ls|list)        shift || true; cmd_list ;;
+  current|cur)    shift || true; cmd_current ;;
+  attach|a)       shift; cmd_attach "$@" ;;
+  new|n)          shift; cmd_new "$@" ;;
+  url)            shift; cmd_url "$@" ;;
+  kill|k)         shift; cmd_kill "$@" ;;
+  -h|--help|help) usage ;;
+  *)              die "unknown command: $1 (try: zjc --help)" ;;
+esac
