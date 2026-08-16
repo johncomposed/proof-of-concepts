@@ -19,17 +19,24 @@ Each session gets a menu entry (`⚡` = claude running with `--remote-control`):
   Browse understands `\\wsl.localhost\...` and drive paths). It runs `zjc new`,
   waits up to 90s for the Remote Control URL, and copies it to the clipboard.
 
-Plus: Refresh now, Start at login, Quit.
+Plus: New session, Refresh, Quit. Right-clicking the tray icon opens a small
+options menu instead: **Start at login** and **Keep WSL alive** (launches a
+detached `dbus-launch` daemon in the default distro so the VM survives all
+terminals closing; toggling off kills only that daemon). Settings persist in
+`settings.json`; diagnostics append to `zjc-tray.log` (both gitignored).
 
 ## Setup
 
 ```
 pnpm install
-pnpm start
+start-tray.cmd
 ```
 
 `pnpm install` also generates `assets/icon.png` (`scripts/make-icon.js`, zero
-dependencies). Enable "Start at login" from the tray menu to keep it around.
+dependencies). Launch with `start-tray.cmd` (or "Start at login" from the
+right-click menu) -- it detaches the applet from the launching terminal.
+`pnpm start` works too but ties the applet's lifetime to that terminal or
+agent session: close it and the applet dies with it.
 
 ## How it finds things
 

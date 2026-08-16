@@ -195,7 +195,7 @@ function ensureMenuWin() {
 function viewModel() {
   return {
     error: lastError,
-    loginEnabled: app.getLoginItemSettings().openAtLogin,
+    loginEnabled: app.getLoginItemSettings(LOGIN_OPTS).openAtLogin,
     sessions: sessions.map((s) => {
       const c = s.claude;
       return {
@@ -248,14 +248,18 @@ function toggleMenu() {
   menuWin.focus();
 }
 
+// Unpackaged app: the login item must be electron.exe + our app dir, otherwise
+// Windows would launch Electron's default welcome app at login.
+const LOGIN_OPTS = { path: process.execPath, args: [__dirname] };
+
 // Right-click: small native options menu (left-click keeps the sessions popup)
 function showOptionsMenu() {
   const menu = Menu.buildFromTemplate([
     {
       label: 'Start at login',
       type: 'checkbox',
-      checked: app.getLoginItemSettings().openAtLogin,
-      click: (mi) => app.setLoginItemSettings({ openAtLogin: mi.checked }),
+      checked: app.getLoginItemSettings(LOGIN_OPTS).openAtLogin,
+      click: (mi) => app.setLoginItemSettings({ openAtLogin: mi.checked, ...LOGIN_OPTS }),
     },
     {
       label: 'Keep WSL alive',
@@ -287,7 +291,7 @@ ipcMain.handle('menu-action', async (_ev, a) => {
     case 'kill': hideMenu(); await killSession(a.name); break;
     case 'new': hideMenu(); openNewSessionWindow(); break;
     case 'refresh': poll(); break;
-    case 'login': app.setLoginItemSettings({ openAtLogin: !!a.enabled }); render(); break;
+    case 'login': app.setLoginItemSettings({ openAtLogin: !!a.enabled, ...LOGIN_OPTS }); render(); break;
     case 'quit': logLine('quit clicked in menu'); app.quit(); break;
     case 'hide': hideMenu(); break;
   }
